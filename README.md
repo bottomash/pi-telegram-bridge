@@ -39,6 +39,12 @@ pi install ./
 pi -e ./
 ```
 
+从 GitHub 安装：
+
+```powershell
+pi install git:github.com/bottomash/pi-telegram-bridge
+```
+
 发布到 npm 后可使用：
 
 ```powershell
