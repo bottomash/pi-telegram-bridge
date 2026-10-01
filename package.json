@@ -1,0 +1,49 @@
+{
+  "name": "pi-telegram-bridge",
+  "version": "0.1.0",
+  "description": "A small final-only Telegram webhook bridge for Pi Agent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bottomash/pi-telegram-bridge.git"
+  },
+  "homepage": "https://github.com/bottomash/pi-telegram-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/bottomash/pi-telegram-bridge/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "telegram",
+    "pi-agent"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "undici": "^8.10.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.99.2",
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.11"
+  }
+}
