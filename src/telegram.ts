@@ -1,3 +1,4 @@
+import telegramifyMarkdown from "telegramify-markdown";
 import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from "undici";
 
 import { MAX_TELEGRAM_CODE_POINTS, type BridgeLogger, consoleLogger } from "./config.js";
@@ -44,12 +45,14 @@ export interface TelegramTransportOptions {
 export class TelegramApiError extends Error {
   public readonly status: number | undefined;
   public readonly retryAfterSeconds: number | undefined;
+  public readonly description: string | undefined;
 
-  public constructor(status?: number, retryAfterSeconds?: number) {
+  public constructor(status?: number, retryAfterSeconds?: number, description?: string) {
     super(status === 429 ? "Telegram API rate limited" : "Telegram API request failed");
     this.name = "TelegramApiError";
     this.status = status;
     this.retryAfterSeconds = retryAfterSeconds;
+    this.description = description;
   }
 }
 
@@ -78,6 +81,21 @@ function isSuccessfulPayload(payload: unknown): boolean {
       typeof payload === "object" &&
       (payload as TelegramApiPayload).ok === true,
   );
+}
+
+function asDescription(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") {
+    return undefined;
+  }
+  const description = (payload as TelegramApiPayload).description;
+  return typeof description === "string" ? description : undefined;
+}
+
+function isMarkdownParseError(error: unknown): boolean {
+  return error instanceof TelegramApiError &&
+    error.status === 400 &&
+    error.description !== undefined &&
+    /(?:parse entities|entity|unsupported start tag)/iu.test(error.description);
 }
 
 function isRetryable(error: TelegramApiError): boolean {
@@ -129,6 +147,13 @@ export function splitTelegramText(
   return chunks;
 }
 
+export function toTelegramMarkdown(text: string): string {
+  const converted = telegramifyMarkdown(text, "escape");
+  return !text.endsWith("\n") && converted.endsWith("\n")
+    ? converted.slice(0, -1)
+    : converted;
+}
+
 export class TelegramTransport {
   private readonly fetchImpl: typeof undiciFetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -151,10 +176,7 @@ export class TelegramTransport {
 
   public async sendMessage(chatId: string | number, text: string): Promise<void> {
     for (const chunk of splitTelegramText(text, this.maxCodePoints)) {
-      await this.request("sendMessage", {
-        chat_id: String(chatId),
-        text: chunk,
-      });
+      await this.sendMarkdownChunk(String(chatId), chunk);
     }
   }
 
@@ -171,6 +193,42 @@ export class TelegramTransport {
     }
     this.closed = true;
     await this.proxyAgent?.close();
+  }
+
+  private async sendMarkdownChunk(chatId: string, text: string): Promise<void> {
+    let markdown: string;
+    try {
+      markdown = toTelegramMarkdown(text);
+    } catch {
+      this.logger.warn("[telegram] Markdown conversion failed; sending plain text");
+      await this.request("sendMessage", { chat_id: chatId, text });
+      return;
+    }
+
+    if (Array.from(markdown).length > this.maxCodePoints) {
+      const codePointLength = Array.from(text).length;
+      const smallerLimit = Math.max(1, Math.floor(codePointLength / 2));
+      if (smallerLimit < codePointLength) {
+        for (const smallerChunk of splitTelegramText(text, smallerLimit)) {
+          await this.sendMarkdownChunk(chatId, smallerChunk);
+        }
+        return;
+      }
+    }
+
+    try {
+      await this.request("sendMessage", {
+        chat_id: chatId,
+        text: markdown,
+        parse_mode: "MarkdownV2",
+      });
+    } catch (error) {
+      if (!isMarkdownParseError(error)) {
+        throw error;
+      }
+      this.logger.warn("[telegram] MarkdownV2 rejected; retrying as plain text");
+      await this.request("sendMessage", { chat_id: chatId, text });
+    }
   }
 
   private async request(method: string, body: Record<string, string>): Promise<void> {
@@ -205,7 +263,7 @@ export class TelegramTransport {
         }
 
         const retryAfter = response.status === 429 ? asRetryAfter(payload) : undefined;
-        throw new TelegramApiError(response.status, retryAfter);
+        throw new TelegramApiError(response.status, retryAfter, asDescription(payload));
       } catch (error) {
         lastError = error instanceof TelegramTransportClosedError
           ? error

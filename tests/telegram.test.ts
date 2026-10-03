@@ -2,7 +2,11 @@ import { fetch as undiciFetch, Response } from "undici";
 import { describe, expect, it, vi } from "vitest";
 
 import type { BridgeLogger } from "../src/config.js";
-import { splitTelegramText, TelegramTransport } from "../src/telegram.js";
+import {
+  splitTelegramText,
+  TelegramTransport,
+  toTelegramMarkdown,
+} from "../src/telegram.js";
 
 function okResponse(): Response {
   return new Response(JSON.stringify({ ok: true, result: {} }), {
@@ -29,6 +33,57 @@ describe("TelegramTransport", () => {
     expect(bodies.map((body) => body.text)).toEqual(["甲乙\n", "丙丁😀戊己", "庚"]);
     expect(bodies.every((body) => body.chat_id === "123")).toBe(true);
     expect(bodies.map((body) => Array.from(body.text).join(""))).toEqual(bodies.map((body) => body.text));
+    await transport.close();
+  });
+
+  it("converts standard Markdown and requests Telegram MarkdownV2 parsing", async () => {
+    const bodies: Array<{ chat_id: string; parse_mode?: string; text: string }> = [];
+    const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as {
+        chat_id: string;
+        parse_mode?: string;
+        text: string;
+      });
+      return okResponse();
+    }) as unknown as typeof undiciFetch;
+    const transport = new TelegramTransport({ botToken: "token", fetchImpl });
+
+    await transport.sendMessage(
+      "123",
+      "**粗体**、`代码` 和 [链接](https://example.com)",
+    );
+
+    expect(bodies).toEqual([{
+      chat_id: "123",
+      parse_mode: "MarkdownV2",
+      text: "*粗体*、`代码` 和 [链接](https://example.com)",
+    }]);
+    await transport.close();
+  });
+
+  it("falls back to plain text when Telegram rejects Markdown entities", async () => {
+    const bodies: Array<{ chat_id: string; parse_mode?: string; text: string }> = [];
+    const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as {
+        chat_id: string;
+        parse_mode?: string;
+        text: string;
+      });
+      return bodies.length === 1
+        ? new Response(JSON.stringify({
+            ok: false,
+            description: "Bad Request: can't parse entities",
+          }), { status: 400 })
+        : okResponse();
+    }) as unknown as typeof undiciFetch;
+    const transport = new TelegramTransport({ botToken: "token", fetchImpl });
+
+    await transport.sendMessage("123", "**粗体**");
+
+    expect(bodies).toEqual([
+      { chat_id: "123", parse_mode: "MarkdownV2", text: "*粗体*" },
+      { chat_id: "123", text: "**粗体**" },
+    ]);
     await transport.close();
   });
 
@@ -126,7 +181,13 @@ describe("TelegramTransport", () => {
   });
 });
 
-describe("splitTelegramText", () => {
+describe("Markdown helpers", () => {
+  it("escapes Telegram MarkdownV2 reserved characters", () => {
+    expect(toTelegramMarkdown("plain + dash - dot.")).toBe(
+      "plain \\+ dash \\- dot\\.",
+    );
+  });
+
   it("does not split surrogate pairs", () => {
     const chunks = splitTelegramText("😀😀😀", 2);
     expect(chunks).toEqual(["😀😀", "😀"]);

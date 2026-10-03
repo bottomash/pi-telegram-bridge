@@ -11,7 +11,7 @@
 - 收到合法 update 后先去重、入队并立即返回 HTTP 200；Pi 任务不占用 Webhook 请求。
 - 一个 FIFO worker 串行执行 Telegram prompt，不并发污染当前 Pi Session。
 - 只在 Pi `agent_settled` 后提取最后一条 assistant 消息的 `text` block；不会发送 thinking、tool call、tool result、流式预览或工作日志。
-- Telegram 回复为纯文本，不设置 `parse_mode`；超过 3900 个 Unicode code point 时优先按换行或空白分段。
+- Pi 的标准 Markdown 回复会转换为 Telegram `MarkdownV2`；若 Telegram 拒绝解析则自动降级为纯文本。超过 3900 个 Unicode code point 时优先按换行或空白分段。
 - `TELEGRAM_PROXY` 仅交给 Telegram transport 的 Undici `ProxyAgent`，不会设置进程级 `HTTP_PROXY`/`HTTPS_PROXY`。
 - Telegram 临时失败按 1、2、4 秒最多重试 3 次；HTTP 429 优先遵循 `retry_after`。
 - 第一版不支持 Long Polling、群聊、媒体、命令、数据库、多用户、多 Session、Web UI 或 SOCKS5。
