@@ -35,6 +35,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
+    "@napi-rs/keyring": "^2.1.0",
     "undici": "^8.10.2"
   },
   "peerDependencies": {

@@ -134,7 +134,7 @@ export class TelegramTransport {
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly logger: BridgeLogger;
   private readonly maxCodePoints: number;
-  private readonly endpoint: string;
+  private readonly apiBaseUrl: string;
   private readonly proxyAgent: ProxyAgent | undefined;
   private closed = false;
 
@@ -143,7 +143,7 @@ export class TelegramTransport {
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.logger = options.logger ?? consoleLogger;
     this.maxCodePoints = options.maxCodePoints ?? MAX_TELEGRAM_CODE_POINTS;
-    this.endpoint = `https://api.telegram.org/bot${options.botToken}/sendMessage`;
+    this.apiBaseUrl = `https://api.telegram.org/bot${options.botToken}`;
     if (options.proxy !== undefined) {
       this.proxyAgent = new ProxyAgent(options.proxy);
     }
@@ -151,8 +151,18 @@ export class TelegramTransport {
 
   public async sendMessage(chatId: string | number, text: string): Promise<void> {
     for (const chunk of splitTelegramText(text, this.maxCodePoints)) {
-      await this.sendChunk(String(chatId), chunk);
+      await this.request("sendMessage", {
+        chat_id: String(chatId),
+        text: chunk,
+      });
     }
+  }
+
+  public async setWebhook(url: string, secretToken: string): Promise<void> {
+    await this.request("setWebhook", {
+      url,
+      secret_token: secretToken,
+    });
   }
 
   public async close(): Promise<void> {
@@ -163,7 +173,7 @@ export class TelegramTransport {
     await this.proxyAgent?.close();
   }
 
-  private async sendChunk(chatId: string, text: string): Promise<void> {
+  private async request(method: string, body: Record<string, string>): Promise<void> {
     let lastError: TelegramApiError | TelegramTransportClosedError | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       if (this.closed) {
@@ -176,16 +186,13 @@ export class TelegramTransport {
           headers: {
             "content-type": "application/json",
           },
-          body: JSON.stringify({
-            chat_id: chatId,
-            text,
-          }),
+          body: JSON.stringify(body),
         };
         if (this.proxyAgent !== undefined) {
           (init as typeof init & { dispatcher?: Dispatcher }).dispatcher = this.proxyAgent;
         }
 
-        const response = await this.fetchImpl(this.endpoint, init);
+        const response = await this.fetchImpl(`${this.apiBaseUrl}/${method}`, init);
         let payload: unknown;
         try {
           payload = await response.json();
@@ -217,7 +224,7 @@ export class TelegramTransport {
         const waitSeconds = lastError instanceof TelegramApiError && lastError.retryAfterSeconds !== undefined
           ? lastError.retryAfterSeconds
           : 2 ** attempt;
-        this.logger.warn(`[telegram] sendMessage retrying after ${waitSeconds}s`);
+        this.logger.warn(`[telegram] ${method} retrying after ${waitSeconds}s`);
         await this.sleep(waitSeconds * 1000);
       }
     }

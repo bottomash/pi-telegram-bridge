@@ -32,6 +32,25 @@ describe("TelegramTransport", () => {
     await transport.close();
   });
 
+  it("registers the public URL and secret with Telegram setWebhook", async () => {
+    const fetchImpl = vi.fn(async () => okResponse()) as unknown as typeof undiciFetch;
+    const transport = new TelegramTransport({ botToken: "123:token", fetchImpl });
+
+    await transport.setWebhook(
+      "https://tg.example.com/telegram/webhook",
+      "webhook-secret",
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0] ?? [];
+    expect(String(url)).toBe("https://api.telegram.org/bot123:token/setWebhook");
+    expect(JSON.parse(String((init as RequestInit | undefined)?.body))).toEqual({
+      url: "https://tg.example.com/telegram/webhook",
+      secret_token: "webhook-secret",
+    });
+    await transport.close();
+  });
+
   it("retries temporary failures with bounded backoff", async () => {
     const fetchImpl = vi
       .fn()

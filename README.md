@@ -53,7 +53,31 @@ pi install npm:pi-telegram-bridge
 
 ## 配置
 
-必须在启动 Pi 的同一 PowerShell 7 会话中设置环境变量：
+### 推荐：一次性交互配置
+
+安装后启动 Pi，运行：
+
+```text
+/pi-telegram-bridge-setup
+```
+
+向导会要求填写 Bot Token、允许访问的私聊 Chat ID、可选代理、监听地址和端口，以及完整的公网 HTTPS Webhook URL（必须以 `/telegram/webhook` 结尾）。Webhook Secret 会自动生成。配置保存并启动本地服务后，向导会通过 Telegram Bot API 自动调用 `setWebhook`，代理设置同样用于这次注册请求。以后启动 Pi 会自动读取配置，不需要重复填写。
+
+在 Windows 上，Bot Token 和 Webhook Secret 保存到当前用户的 Windows Credential Manager，凭据服务名为 `pi-telegram-bridge`，账户名分别为 `bot-token` 和 `webhook-secret`。非敏感配置保存在：
+
+```text
+~/.pi/agent/telegram-bridge/config.json
+```
+
+Windows 上通常对应：
+
+```text
+C:/Users/<用户名>/.pi/agent/telegram-bridge/config.json
+```
+
+### 可选：环境变量
+
+环境变量会覆盖交互向导保存的对应值，适合自动化运行。必须在启动 Pi 的同一 PowerShell 7 会话中设置：
 
 ```powershell
 $env:TELEGRAM_BOT_TOKEN = "xxx"
@@ -65,7 +89,7 @@ $env:TELEGRAM_PORT = "8787"
 pi
 ```
 
-`TELEGRAM_PROXY` 可省略；省略时 Telegram Bot API 直连。代理只支持 `http://` 或 `https://`。默认监听 `127.0.0.1:8787`。
+`TELEGRAM_PROXY` 可省略；省略时 Telegram Bot API 直连。代理只支持 `http://` 或 `https://`。默认监听 `127.0.0.1:8787`。如果没有环境变量和已保存配置，插件不会启动 Webhook 服务，并会提示运行 `/pi-telegram-bridge-setup`。
 
 ## Cloudflare Tunnel
 
@@ -85,7 +109,15 @@ https://tg.example.com/telegram/webhook
 
 ## 设置 Telegram Webhook
 
-PowerShell 7 示例：
+运行 `/pi-telegram-bridge-setup` 时填写完整的公网 URL，例如：
+
+```text
+https://tg.example.com/telegram/webhook
+```
+
+本地 Webhook 服务成功启动后，向导会使用生成的 Webhook Secret 自动向 Telegram 注册该 URL。若注册失败，Bridge 会保持运行并显示错误提示；检查网络、代理和公网 Tunnel 后，可重新运行配置向导再次注册。
+
+仅使用环境变量、不运行交互向导时，仍需手动注册：
 
 ```powershell
 $uri = "https://api.telegram.org/bot$($env:TELEGRAM_BOT_TOKEN)/setWebhook"
@@ -94,13 +126,7 @@ curl.exe -X POST $uri `
   -d "secret_token=$($env:TELEGRAM_WEBHOOK_SECRET)"
 ```
 
-在中国大陆网络环境下，这次 `setWebhook` 请求本身也可能需要代理。例如：
-
-```powershell
-curl.exe --proxy http://127.0.0.1:7890 -X POST $uri `
-  -d "url=https://tg.example.com/telegram/webhook" `
-  -d "secret_token=$($env:TELEGRAM_WEBHOOK_SECRET)"
-```
+需要代理时为 `curl.exe` 增加 `--proxy http://127.0.0.1:7890`。
 
 ## 运行行为
 
