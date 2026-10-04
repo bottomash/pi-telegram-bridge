@@ -83,6 +83,7 @@ export async function processTelegramJob(
 }
 
 interface ActiveRuntime {
+  config: BridgeConfig;
   server: WebhookServer;
   queue: FifoQueue<void>;
   transport: TelegramTransport;
@@ -136,7 +137,7 @@ function createRuntime(
         });
     },
   });
-  return { server, queue, transport };
+  return { config, server, queue, transport };
 }
 
 export default function telegramBridgeExtension(pi: ExtensionAPI): void {
@@ -163,6 +164,74 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
       return false;
     }
   };
+
+  pi.registerCommand("pi-telegram-bridge", {
+    description: "启动、停止或查看 Telegram Bridge 状态",
+    handler: async (args: string, context: ExtensionCommandContext) => {
+      const command = args.trim().toLowerCase();
+
+      if (command === "up") {
+        if (runtime !== undefined) {
+          context.ui.notify(
+            `Telegram Bridge 已在 http://${runtime.config.host}:${runtime.config.port} 运行`,
+            "info",
+          );
+          return;
+        }
+
+        let config: BridgeConfig;
+        try {
+          config = await loadEffectiveConfig({ credentialStore });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "invalid configuration";
+          logger.error(`[telegram] configuration error: ${message}`);
+          context.ui.notify(
+            "Telegram Bridge 尚未配置，请先运行 /pi-telegram-bridge-setup",
+            "error",
+          );
+          return;
+        }
+
+        if (await activate(config, context)) {
+          context.ui.notify(
+            `Telegram Bridge 已启动：http://${config.host}:${config.port}`,
+            "info",
+          );
+        } else {
+          context.ui.notify("Telegram Bridge 启动失败，请检查日志", "error");
+        }
+        return;
+      }
+
+      if (command === "down") {
+        const current = runtime;
+        runtime = undefined;
+        if (current === undefined) {
+          piBridge.stop();
+          context.ui.notify("Telegram Bridge 当前未运行", "info");
+          return;
+        }
+        await stopRuntime(current, piBridge, logger);
+        context.ui.notify("Telegram Bridge 已停止", "info");
+        return;
+      }
+
+      if (command === "status") {
+        context.ui.notify(
+          runtime === undefined
+            ? "Telegram Bridge 当前未运行"
+            : `Telegram Bridge 正在 http://${runtime.config.host}:${runtime.config.port} 运行`,
+          "info",
+        );
+        return;
+      }
+
+      context.ui.notify(
+        "用法：/pi-telegram-bridge up|down|status",
+        "warning",
+      );
+    },
+  });
 
   pi.registerCommand("pi-telegram-bridge-setup", {
     description: "交互配置并持久保存 Telegram Bridge",
@@ -295,53 +364,49 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      const started = await activate(config, context);
-      const activeRuntime = runtime;
-      if (!started || activeRuntime === undefined) {
-        context.ui.notify("配置已保存，但 Webhook 服务启动失败，请检查日志", "error");
-        return;
+      const current = runtime;
+      runtime = undefined;
+      if (current !== undefined) {
+        await stopRuntime(current, piBridge, logger);
       }
 
+      const registrationTransport = new TelegramTransport({
+        botToken: config.botToken,
+        logger,
+        ...(config.telegramProxy === undefined ? {} : { proxy: config.telegramProxy }),
+      });
       try {
-        await activeRuntime.transport.setWebhook(webhookUrl, webhookSecret);
+        await registrationTransport.setWebhook(webhookUrl, webhookSecret);
       } catch (error) {
         logger.error(`[telegram] setWebhook failed: ${safeErrorLabel(error)}`);
         context.ui.notify(
-          "配置已保存且 Bridge 已启动，但 Telegram Webhook 注册失败，请检查日志",
+          "配置已保存，但 Telegram Webhook 注册失败，请检查日志",
           "error",
         );
         return;
+      } finally {
+        try {
+          await registrationTransport.close();
+        } catch {
+          logger.error("[telegram] setup transport shutdown failed");
+        }
       }
 
       context.ui.notify(
-        "配置已保存、Bridge 已启动并已注册 Telegram Webhook",
+        "配置已保存并已注册 Telegram Webhook；运行 /pi-telegram-bridge up 启动 Bridge",
         "info",
       );
     },
   });
 
-  pi.on("session_start", async (_event, context: ExtensionContext) => {
-    if (runtime !== undefined) {
-      await stopRuntime(runtime, piBridge, logger);
-      runtime = undefined;
+  pi.on("session_start", async () => {
+    const current = runtime;
+    runtime = undefined;
+    if (current !== undefined) {
+      await stopRuntime(current, piBridge, logger);
+    } else {
+      piBridge.stop();
     }
-
-    let config: BridgeConfig;
-    try {
-      config = await loadEffectiveConfig({ credentialStore });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "invalid configuration";
-      logger.error(`[telegram] configuration error: ${message}`);
-      if (context.hasUI) {
-        context.ui.notify(
-          "Telegram Bridge 尚未配置，请运行 /pi-telegram-bridge-setup",
-          "warning",
-        );
-      }
-      return;
-    }
-
-    await activate(config, context);
   });
 
   pi.on("session_shutdown", async (_event: SessionShutdownEvent) => {

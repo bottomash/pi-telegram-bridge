@@ -61,7 +61,7 @@ pi install npm:pi-telegram-bridge
 /pi-telegram-bridge-setup
 ```
 
-向导会要求填写 Bot Token、允许访问的私聊 Chat ID、可选代理、监听地址和端口，以及完整的公网 HTTPS Webhook URL（必须以 `/telegram/webhook` 结尾）。Webhook Secret 会自动生成。配置保存并启动本地服务后，向导会通过 Telegram Bot API 自动调用 `setWebhook`，代理设置同样用于这次注册请求。以后启动 Pi 会自动读取配置，不需要重复填写。
+向导会要求填写 Bot Token、允许访问的私聊 Chat ID、可选代理、监听地址和端口，以及完整的公网 HTTPS Webhook URL（必须以 `/telegram/webhook` 结尾）。Webhook Secret 会自动生成。向导保存配置后会通过 Telegram Bot API 自动调用 `setWebhook`，代理设置同样用于这次注册请求，但不会启动本地服务。配置完成后运行 `/pi-telegram-bridge up` 启动 Bridge。
 
 在 Windows 上，Bot Token 和 Webhook Secret 保存到当前用户的 Windows Credential Manager，凭据服务名为 `pi-telegram-bridge`，账户名分别为 `bot-token` 和 `webhook-secret`。非敏感配置保存在：
 
@@ -89,7 +89,7 @@ $env:TELEGRAM_PORT = "8787"
 pi
 ```
 
-`TELEGRAM_PROXY` 可省略；省略时 Telegram Bot API 直连。代理只支持 `http://` 或 `https://`。默认监听 `127.0.0.1:8787`。如果没有环境变量和已保存配置，插件不会启动 Webhook 服务，并会提示运行 `/pi-telegram-bridge-setup`。
+`TELEGRAM_PROXY` 可省略；省略时 Telegram Bot API 直连。代理只支持 `http://` 或 `https://`。默认监听 `127.0.0.1:8787`。插件不会随 Pi 自动启动 Webhook 服务；运行 `/pi-telegram-bridge up` 时才会读取环境变量和已保存配置。如果配置不完整，命令会提示先运行 `/pi-telegram-bridge-setup`。
 
 ## Cloudflare Tunnel
 
@@ -115,7 +115,7 @@ https://tg.example.com/telegram/webhook
 https://tg.example.com/telegram/webhook
 ```
 
-本地 Webhook 服务成功启动后，向导会使用生成的 Webhook Secret 自动向 Telegram 注册该 URL。若注册失败，Bridge 会保持运行并显示错误提示；检查网络、代理和公网 Tunnel 后，可重新运行配置向导再次注册。
+向导保存配置后会使用生成的 Webhook Secret 向 Telegram 注册该 URL，但 Bridge 会保持停止。若注册失败，配置仍会保留并显示错误提示；检查网络、代理和公网 Tunnel 后，可重新运行配置向导再次注册。
 
 仅使用环境变量、不运行交互向导时，仍需手动注册：
 
@@ -130,7 +130,15 @@ curl.exe -X POST $uri `
 
 ## 运行行为
 
-启动 Pi session 后扩展才会创建本地 HTTP 服务。合法文字 update 会立刻得到 HTTP 200，然后在后台排队。第一条任务完整结束并发送最终答复后，队列才会提交第二条 prompt。
+扩展会随 Pi 加载以注册命令，但默认不会创建本地 HTTP 服务。使用以下命令控制 Bridge：
+
+```text
+/pi-telegram-bridge up      # 读取配置并启动
+/pi-telegram-bridge down    # 停止
+/pi-telegram-bridge status  # 查看状态
+```
+
+`up` 状态不会持久化；每次启动 Pi 或切换 session 后都需要重新执行 `/pi-telegram-bridge up`。服务运行时，合法文字 update 会立刻得到 HTTP 200，然后在后台排队。第一条任务完整结束并发送最终答复后，队列才会提交第二条 prompt。
 
 Pi session 退出、切换、reload 或 fork 时，扩展会先停止接收 Webhook，再关闭队列、Pi bridge 和 Telegram transport。内存去重缓存与未执行队列不会跨进程保存。
 
