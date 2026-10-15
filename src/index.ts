@@ -13,6 +13,7 @@ import {
   DEFAULT_HOST,
   DEFAULT_PORT,
   loadConfig,
+  quietConsoleLogger,
   type BridgeConfig,
   type BridgeLogger,
 } from "./config.js";
@@ -155,7 +156,7 @@ function createRuntime(
 }
 
 export default function telegramBridgeExtension(pi: ExtensionAPI): void {
-  const logger = consoleLogger;
+  const logger = quietConsoleLogger;
   const piBridge = createPiBridge(pi);
   const credentialStore = new SystemCredentialStore();
   let runtime: ActiveRuntime | undefined;

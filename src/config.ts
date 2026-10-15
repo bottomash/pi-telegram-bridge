@@ -14,6 +14,12 @@ export const consoleLogger: BridgeLogger = {
   error: (message) => console.error(message),
 };
 
+export const quietConsoleLogger: BridgeLogger = {
+  info: () => undefined,
+  warn: (message) => console.warn(message),
+  error: (message) => console.error(message),
+};
+
 export interface BridgeConfig {
   botToken: string;
   allowedChatId: string;

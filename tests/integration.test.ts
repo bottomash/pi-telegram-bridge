@@ -1,13 +1,32 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import { quietConsoleLogger } from "../src/config.js";
 import telegramBridgeExtension, { PI_FAILURE_MESSAGE, processTelegramJob } from "../src/index.js";
 import type { TelegramJob } from "../src/telegram.js";
 
 const job: TelegramJob = { updateId: 1, chatId: "123", text: "question" };
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("telegramBridgeExtension", () => {
+  it("keeps routine bridge activity out of the Pi conversation", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const piRunner = { run: vi.fn(async () => ({ text: "final answer" })) };
+    const telegram = { sendMessage: vi.fn(async () => undefined) };
+
+    await processTelegramJob(job, piRunner, telegram, quietConsoleLogger);
+
+    expect(info).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it("registers lifecycle commands and stays stopped when a session starts", async () => {
     const commands = new Map<string, { handler: (args: string, context: ExtensionCommandContext) => Promise<void> }>();
     const events = new Map<string, Array<(event: unknown, context: ExtensionContext) => Promise<void> | void>>();
