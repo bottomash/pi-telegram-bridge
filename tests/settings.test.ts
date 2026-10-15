@@ -6,9 +6,17 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   generateWebhookSecret,
+  getAutostartProfile,
+  getProfileAutostartDirectories,
+  listProfiles,
   loadEffectiveConfig,
+  normalizeWorkingDirectory,
+  profileConfigPath,
   readSavedConfig,
   saveConfig,
+  setAutostartProfile,
+  setProfileAutostartDirectory,
+  validateProfileName,
   validateWebhookUrl,
   type CredentialStore,
 } from "../src/settings.js";
@@ -110,6 +118,80 @@ describe("persistent Telegram configuration", () => {
       host: "localhost",
       port: 9000,
     });
+  });
+
+  it("keeps named profiles separate and does not apply default environment overrides", async () => {
+    const configPath = await temporaryConfigPath();
+    const configDirectory = join(configPath, "..");
+    const namedPath = profileConfigPath("beancount", configDirectory);
+    await saveConfig({
+      allowedChatId: "333",
+      host: "127.0.0.1",
+      port: 9999,
+    }, namedPath);
+
+    await expect(loadEffectiveConfig({
+      env: {
+        TELEGRAM_BOT_TOKEN: "default-environment-token",
+        TELEGRAM_ALLOWED_CHAT_ID: "222",
+        TELEGRAM_WEBHOOK_SECRET: "default-environment-secret",
+      },
+      configDirectory,
+      profileName: "beancount",
+      credentialStore: {
+        load: async (profileName) => ({
+          botToken: `${profileName}-token`,
+          webhookSecret: `${profileName}-secret`,
+        }),
+        save: async () => undefined,
+      },
+    })).resolves.toEqual({
+      botToken: "beancount-token",
+      allowedChatId: "333",
+      webhookSecret: "beancount-secret",
+      host: "127.0.0.1",
+      port: 9999,
+    });
+    await expect(listProfiles(configDirectory)).resolves.toEqual(["beancount"]);
+  });
+
+  it("binds one Bot profile to a working directory for automatic startup", async () => {
+    const configPath = await temporaryConfigPath();
+    const autostartPath = join(configPath, "..", "autostart.json");
+    const workingDirectory = join(configPath, "..", "project");
+
+    await setAutostartProfile(workingDirectory, "beancount", autostartPath);
+    await expect(getAutostartProfile(workingDirectory, autostartPath)).resolves.toBe("beancount");
+    await setAutostartProfile(workingDirectory, undefined, autostartPath);
+    await expect(getAutostartProfile(workingDirectory, autostartPath)).resolves.toBeUndefined();
+  });
+
+  it("replaces a profile's old directory binding during setup", async () => {
+    const configPath = await temporaryConfigPath();
+    const autostartPath = join(configPath, "..", "autostart.json");
+    const oldDirectory = join(configPath, "..", "old-project");
+    const newDirectory = join(configPath, "..", "new-project");
+
+    await setAutostartProfile(oldDirectory, "beancount", autostartPath);
+    await setProfileAutostartDirectory("beancount", newDirectory, autostartPath);
+    await expect(getAutostartProfile(oldDirectory, autostartPath)).resolves.toBeUndefined();
+    await expect(getAutostartProfile(newDirectory, autostartPath)).resolves.toBe("beancount");
+    await expect(getProfileAutostartDirectories("beancount", autostartPath))
+      .resolves.toEqual([normalizeWorkingDirectory(newDirectory)]);
+  });
+
+  it("validates Bot profile names", () => {
+    expect(validateProfileName("beancount-bot_2")).toBe("beancount-bot_2");
+    expect(() => validateProfileName("../../secret")).toThrow("只能包含");
+  });
+
+  it("rejects URL syntax in the local listening host", async () => {
+    const configPath = await temporaryConfigPath();
+    await expect(saveConfig({
+      allowedChatId: "123456789",
+      host: "http://localhost",
+      port: 8787,
+    }, configPath)).rejects.toThrow("hostname or IP address");
   });
 
   it("validates the public Telegram Webhook URL", () => {

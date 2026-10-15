@@ -31,6 +31,14 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
+function parseHost(value: string | undefined): string {
+  const host = value?.trim() || DEFAULT_HOST;
+  if (host.includes("://") || /[\s/\\]/u.test(host)) {
+    throw new Error("TELEGRAM_HOST must be a hostname or IP address without a URL scheme");
+  }
+  return host;
+}
+
 function parsePort(value: string | undefined): number {
   if (value === undefined || value.trim() === "") {
     return DEFAULT_PORT;
@@ -66,7 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   const botToken = required(env, "TELEGRAM_BOT_TOKEN");
   const allowedChatId = required(env, "TELEGRAM_ALLOWED_CHAT_ID");
   const webhookSecret = required(env, "TELEGRAM_WEBHOOK_SECRET");
-  const host = env.TELEGRAM_HOST?.trim() || DEFAULT_HOST;
+  const host = parseHost(env.TELEGRAM_HOST);
   const port = parsePort(env.TELEGRAM_PORT);
   const telegramProxy = parseProxy(env.TELEGRAM_PROXY);
 

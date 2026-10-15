@@ -1,6 +1,6 @@
 # Pi Telegram Webhook Bridge
 
-一个只做单用户、单 Pi Session、纯文字、Webhook、final-only 的轻量级 Telegram Bridge。
+一个只做单用户、纯文字、Webhook、final-only 的轻量级 Telegram Bridge。支持命名 Bot 配置；每个 Pi Session 运行一个 Bot，多个 Pi Session 可分别运行不同 Bot。
 
 链路：Telegram Webhook → Cloudflare Tunnel → 本地 HTTP 服务 → Pi → 等待 `agent_settled` → Telegram `sendMessage`。
 
@@ -14,7 +14,8 @@
 - Pi 的标准 Markdown 回复会转换为 Telegram `MarkdownV2`；若 Telegram 拒绝解析则自动降级为纯文本。超过 3900 个 Unicode code point 时优先按换行或空白分段。
 - `TELEGRAM_PROXY` 仅交给 Telegram transport 的 Undici `ProxyAgent`，不会设置进程级 `HTTP_PROXY`/`HTTPS_PROXY`。
 - Telegram 临时失败按 1、2、4 秒最多重试 3 次；HTTP 429 优先遵循 `retry_after`。
-- 第一版不支持 Long Polling、群聊、媒体、命令、数据库、多用户、多 Session、Web UI 或 SOCKS5。
+- 单个 Pi Session 同时只运行一个 Bot；不同工作目录和 Pi Session 可以绑定不同 Bot。
+- 不支持 Long Polling、群聊、媒体、Telegram 命令、数据库、多用户、Web UI 或 SOCKS5。
 
 ## 要求
 
@@ -58,12 +59,15 @@ pi install npm:pi-telegram-bridge
 安装后启动 Pi，运行：
 
 ```text
-/pi-telegram-bridge-setup
+/pi-telegram-bridge-setup                  # 配置兼容旧版本的 default Bot
+/pi-telegram-bridge-setup beancount       # 新建或编辑命名 Bot
 ```
 
-向导会要求填写 Bot Token、允许访问的私聊 Chat ID、可选代理、监听地址和端口，以及完整的公网 HTTPS Webhook URL（必须以 `/telegram/webhook` 结尾）。Webhook Secret 会自动生成。向导保存配置后会通过 Telegram Bot API 自动调用 `setWebhook`，代理设置同样用于这次注册请求，但不会启动本地服务。配置完成后运行 `/pi-telegram-bridge up` 启动 Bridge。
+配置名称只允许字母、数字、`-` 和 `_`。向导会一次完成 Bot Token、允许访问的私聊 Chat ID、代理、监听端口、完整公网 HTTPS Webhook URL、Pi 工作目录、Bridge 随 Pi 启动，以及 Windows 登录后启动 Pi 的全部设置。新配置的监听地址固定为安全的 `127.0.0.1`，不再要求普通用户填写；已有配置中的有效监听地址会保留。Webhook Secret 会自动生成，并通过 Telegram Bot API 自动调用 `setWebhook`。
 
-在 Windows 上，Bot Token 和 Webhook Secret 保存到当前用户的 Windows Credential Manager，凭据服务名为 `pi-telegram-bridge`，账户名分别为 `bot-token` 和 `webhook-secret`。非敏感配置保存在：
+Windows 登录自启动启用后，setup 会创建或更新名为 `Pi Telegram Bridge - <配置名称>` 的计划任务，并可选择正常或最小化显示 Pi。重复运行 setup 不会创建重复任务；关闭自动启动会移除对应目录绑定和计划任务。非 Windows 系统会跳过 Windows 计划任务步骤。
+
+在 Windows 上，Bot Token 和 Webhook Secret 保存到当前用户的 Windows Credential Manager。`default` 继续使用旧版账户名 `bot-token` 和 `webhook-secret`；命名配置使用带配置名称的独立账户。非敏感配置保存在：
 
 ```text
 ~/.pi/agent/telegram-bridge/config.json
@@ -73,7 +77,10 @@ Windows 上通常对应：
 
 ```text
 C:/Users/<用户名>/.pi/agent/telegram-bridge/config.json
+C:/Users/<用户名>/.pi/agent/telegram-bridge/profiles/<配置名称>.json
 ```
+
+现有单 Bot 配置会继续作为 `default` 使用，无需迁移。
 
 ### 可选：环境变量
 
@@ -89,7 +96,7 @@ $env:TELEGRAM_PORT = "8787"
 pi
 ```
 
-`TELEGRAM_PROXY` 可省略；省略时 Telegram Bot API 直连。代理只支持 `http://` 或 `https://`。默认监听 `127.0.0.1:8787`。插件不会随 Pi 自动启动 Webhook 服务；运行 `/pi-telegram-bridge up` 时才会读取环境变量和已保存配置。如果配置不完整，命令会提示先运行 `/pi-telegram-bridge-setup`。
+`TELEGRAM_PROXY` 可省略；省略时 Telegram Bot API 直连。代理只支持 `http://` 或 `https://`。默认监听 `127.0.0.1:8787`。环境变量只覆盖 `default`，不会意外覆盖命名 Bot。未绑定目录自动启动时，运行 `/pi-telegram-bridge up [配置名称]` 才会启动服务。
 
 ## Cloudflare Tunnel
 
@@ -133,12 +140,27 @@ curl.exe -X POST $uri `
 扩展会随 Pi 加载以注册命令，但默认不会创建本地 HTTP 服务。使用以下命令控制 Bridge：
 
 ```text
-/pi-telegram-bridge up      # 读取配置并启动
-/pi-telegram-bridge down    # 停止
-/pi-telegram-bridge status  # 查看状态
+/pi-telegram-bridge up [配置名称]              # 启动 default 或指定 Bot
+/pi-telegram-bridge down                       # 停止当前 Bot
+/pi-telegram-bridge status                     # 查看当前 Bot 和监听地址
+/pi-telegram-bridge list                       # 列出配置
+/pi-telegram-bridge autostart <配置名称>        # 将当前工作目录绑定到 Bot
+/pi-telegram-bridge autostart off               # 取消当前目录绑定
 ```
 
-`up` 状态不会持久化；每次启动 Pi 或切换 session 后都需要重新执行 `/pi-telegram-bridge up`。服务运行时，合法文字 update 会立刻得到 HTTP 200，然后在后台排队。第一条任务完整结束并发送最终答复后，队列才会提交第二条 prompt。
+未绑定目录时，每次启动 Pi 或切换 session 后需要手动执行 `up`。绑定后，Pi 在该目录触发 `session_start` 时会自动读取并启动对应 Bot。一个 Pi Session 同时只能运行一个 Bot；要切换 Bot，先执行 `down`。服务运行时，合法文字 update 会立刻得到 HTTP 200，然后在后台排队。第一条任务完整结束并发送最终答复后，队列才会提交第二条 prompt。
+
+### Windows 登录后自动启动 Pi 和 Bridge
+
+运行一次 setup，并在向导中启用“Bridge 自动启动”和“Windows 登录自启动”：
+
+```text
+/pi-telegram-bridge-setup beancount
+```
+
+setup 会校验 Pi 工作目录、保存目录与 Bot 的绑定，并创建或更新 Windows 计划任务。用户登录后，计划任务先在指定目录启动 Pi；Pi 加载扩展并触发 `session_start` 后，Bridge 自动开始监听。每个同时运行的 Pi/Bot 必须使用不同本地端口，公网 Tunnel 也必须路由到相应端口。
+
+`/pi-telegram-bridge autostart ...` 仍作为高级和兼容命令保留，但普通配置不再需要单独执行。
 
 Pi session 退出、切换、reload 或 fork 时，扩展会先停止接收 Webhook，再关闭队列、Pi bridge 和 Telegram transport。内存去重缓存与未执行队列不会跨进程保存。
 
