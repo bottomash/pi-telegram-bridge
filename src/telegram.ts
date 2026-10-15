@@ -4,6 +4,7 @@ import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from "undici";
 import { MAX_TELEGRAM_CODE_POINTS, type BridgeLogger, consoleLogger } from "./config.js";
 
 const MAX_RETRIES = 3;
+const MAX_TELEGRAM_ENTITIES = 100;
 
 export interface TelegramUpdate {
   update_id: number;
@@ -31,6 +32,18 @@ export interface TelegramApiPayload {
     retry_after?: unknown;
   };
   result?: unknown;
+}
+
+export interface TelegramMessageEntity {
+  type: "bold" | "italic" | "strikethrough" | "code" | "pre" | "text_link" | "blockquote";
+  offset: number;
+  length: number;
+  url?: string;
+}
+
+export interface TelegramFormattedText {
+  text: string;
+  entities: TelegramMessageEntity[];
 }
 
 export interface TelegramTransportOptions {
@@ -91,11 +104,18 @@ function asDescription(payload: unknown): string | undefined {
   return typeof description === "string" ? description : undefined;
 }
 
-function isMarkdownParseError(error: unknown): boolean {
+function isFormattingEntityError(error: unknown): error is TelegramApiError {
   return error instanceof TelegramApiError &&
     error.status === 400 &&
     error.description !== undefined &&
     /(?:parse entities|entity|unsupported start tag)/iu.test(error.description);
+}
+
+function describeTelegramError(error: TelegramApiError): string {
+  const description = error.description?.replace(/\s+/gu, " ").trim();
+  return description === undefined || description === ""
+    ? "Telegram HTTP 400"
+    : description.slice(0, 300);
 }
 
 function isRetryable(error: TelegramApiError): boolean {
@@ -154,6 +174,277 @@ export function toTelegramMarkdown(text: string): string {
     : converted;
 }
 
+interface ParsedMarkdownSegment extends TelegramFormattedText {
+  nextIndex: number;
+  closed: boolean;
+}
+
+function appendParsedSegment(
+  target: TelegramFormattedText,
+  segment: TelegramFormattedText,
+): void {
+  const offset = target.text.length;
+  target.text += segment.text;
+  target.entities.push(...segment.entities.map((entity) => ({
+    ...entity,
+    offset: entity.offset + offset,
+  })));
+}
+
+function decodeMarkdownEscapes(value: string): string {
+  let decoded = "";
+  for (let index = 0; index < value.length;) {
+    if (value[index] === "\\" && index + 1 < value.length) {
+      const codePoint = value.codePointAt(index + 1);
+      if (codePoint !== undefined) {
+        const character = String.fromCodePoint(codePoint);
+        decoded += character;
+        index += 1 + character.length;
+        continue;
+      }
+    }
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) {
+      break;
+    }
+    const character = String.fromCodePoint(codePoint);
+    decoded += character;
+    index += character.length;
+  }
+  return decoded;
+}
+
+function findUnescaped(value: string, token: string, start: number): number {
+  for (let index = start; index <= value.length - token.length; index += 1) {
+    if (!value.startsWith(token, index)) {
+      continue;
+    }
+    let slashes = 0;
+    for (let before = index - 1; before >= 0 && value[before] === "\\"; before -= 1) {
+      slashes += 1;
+    }
+    if (slashes % 2 === 0) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function parseMarkdownSegment(
+  markdown: string,
+  start = 0,
+  stopToken?: string,
+): ParsedMarkdownSegment {
+  const result: TelegramFormattedText = { text: "", entities: [] };
+  let index = start;
+  let atLineStart = start === 0 || markdown[start - 1] === "\n";
+
+  while (index < markdown.length) {
+    if (stopToken !== undefined && markdown.startsWith(stopToken, index)) {
+      return { ...result, nextIndex: index + stopToken.length, closed: true };
+    }
+
+    if (markdown[index] === "\\" && index + 1 < markdown.length) {
+      const codePoint = markdown.codePointAt(index + 1);
+      if (codePoint !== undefined) {
+        const character = String.fromCodePoint(codePoint);
+        result.text += character;
+        atLineStart = character === "\n";
+        index += 1 + character.length;
+        continue;
+      }
+    }
+
+    if (markdown.startsWith("```", index)) {
+      const end = findUnescaped(markdown, "```", index + 3);
+      if (end >= 0) {
+        let content = decodeMarkdownEscapes(markdown.slice(index + 3, end));
+        if (content.startsWith("\n")) {
+          content = content.slice(1);
+        }
+        if (content.endsWith("\n")) {
+          content = content.slice(0, -1);
+        }
+        const offset = result.text.length;
+        result.text += content;
+        if (content.length > 0) {
+          result.entities.push({ type: "pre", offset, length: content.length });
+        }
+        atLineStart = content.endsWith("\n");
+        index = end + 3;
+        continue;
+      }
+    }
+
+    if (markdown[index] === "`") {
+      const end = findUnescaped(markdown, "`", index + 1);
+      if (end >= 0) {
+        const content = decodeMarkdownEscapes(markdown.slice(index + 1, end));
+        const offset = result.text.length;
+        result.text += content;
+        if (content.length > 0) {
+          result.entities.push({ type: "code", offset, length: content.length });
+        }
+        atLineStart = content.endsWith("\n");
+        index = end + 1;
+        continue;
+      }
+    }
+
+    if (atLineStart && markdown[index] === ">") {
+      const quote = parseMarkdownSegment(
+        markdown,
+        index + (markdown[index + 1] === " " ? 2 : 1),
+        "\n",
+      );
+      const offset = result.text.length;
+      appendParsedSegment(result, quote);
+      if (quote.text.length > 0) {
+        result.entities.push({ type: "blockquote", offset, length: quote.text.length });
+      }
+      if (quote.closed) {
+        result.text += "\n";
+      }
+      index = quote.nextIndex;
+      atLineStart = true;
+      continue;
+    }
+
+    const markerTypes: Readonly<Record<string, TelegramMessageEntity["type"]>> = {
+      "*": "bold",
+      "_": "italic",
+      "~": "strikethrough",
+    };
+    const marker = markdown[index];
+    const markerType = marker === undefined ? undefined : markerTypes[marker];
+    if (marker !== undefined && markerType !== undefined) {
+      const nested = parseMarkdownSegment(markdown, index + 1, marker);
+      if (nested.closed) {
+        const offset = result.text.length;
+        appendParsedSegment(result, nested);
+        if (nested.text.length > 0) {
+          result.entities.push({ type: markerType, offset, length: nested.text.length });
+        }
+        index = nested.nextIndex;
+        atLineStart = nested.text.endsWith("\n");
+        continue;
+      }
+      result.text += marker;
+      appendParsedSegment(result, nested);
+      index = nested.nextIndex;
+      atLineStart = nested.text.endsWith("\n");
+      continue;
+    }
+
+    if (markdown[index] === "[") {
+      const label = parseMarkdownSegment(markdown, index + 1, "]");
+      if (label.closed && markdown[label.nextIndex] === "(") {
+        const urlEnd = findUnescaped(markdown, ")", label.nextIndex + 1);
+        if (urlEnd >= 0) {
+          const offset = result.text.length;
+          appendParsedSegment(result, label);
+          if (label.text.length > 0) {
+            result.entities.push({
+              type: "text_link",
+              offset,
+              length: label.text.length,
+              url: decodeMarkdownEscapes(markdown.slice(label.nextIndex + 1, urlEnd)),
+            });
+          }
+          index = urlEnd + 1;
+          atLineStart = label.text.endsWith("\n");
+          continue;
+        }
+      }
+      result.text += "[";
+      appendParsedSegment(result, label);
+      index = label.nextIndex;
+      atLineStart = label.text.endsWith("\n");
+      continue;
+    }
+
+    const codePoint = markdown.codePointAt(index);
+    if (codePoint === undefined) {
+      break;
+    }
+    const character = String.fromCodePoint(codePoint);
+    result.text += character;
+    atLineStart = character === "\n";
+    index += character.length;
+  }
+
+  return { ...result, nextIndex: index, closed: false };
+}
+
+/** Convert standard Markdown into plain text plus Bot API entities, avoiding parse_mode ambiguity. */
+export function toTelegramFormattedText(text: string): TelegramFormattedText {
+  const markdown = toTelegramMarkdown(text);
+  const parsed = parseMarkdownSegment(markdown);
+  const codeRanges = parsed.entities
+    .filter((entity) => entity.type === "code" || entity.type === "pre")
+    .map((entity) => [entity.offset, entity.offset + entity.length] as const);
+  return {
+    text: parsed.text,
+    entities: parsed.entities
+      .filter((entity) => {
+        if (entity.length <= 0 || entity.type === "code" || entity.type === "pre") {
+          return entity.length > 0;
+        }
+        // Telegram forbids every other formatting entity from overlapping code/pre.
+        return !codeRanges.some(([start, end]) => entity.offset < end && entity.offset + entity.length > start);
+      })
+      .sort((left, right) => left.offset - right.offset || right.length - left.length),
+  };
+}
+
+function sliceFormattedText(
+  formatted: TelegramFormattedText,
+  start: number,
+  end: number,
+): TelegramFormattedText {
+  return {
+    text: formatted.text.slice(start, end),
+    entities: formatted.entities.flatMap((entity): TelegramMessageEntity[] => {
+      const entityStart = Math.max(start, entity.offset);
+      const entityEnd = Math.min(end, entity.offset + entity.length);
+      return entityEnd <= entityStart ? [] : [{
+        ...entity,
+        offset: entityStart - start,
+        length: entityEnd - entityStart,
+      }];
+    }),
+  };
+}
+
+function splitByEntityLimit(formatted: TelegramFormattedText): TelegramFormattedText[] {
+  if (formatted.entities.length <= MAX_TELEGRAM_ENTITIES) {
+    return [formatted];
+  }
+  const codePoints = Array.from(formatted.text);
+  if (codePoints.length <= 1) {
+    return [{ ...formatted, entities: formatted.entities.slice(0, MAX_TELEGRAM_ENTITIES) }];
+  }
+  const leftText = codePoints.slice(0, Math.ceil(codePoints.length / 2)).join("");
+  const left = sliceFormattedText(formatted, 0, leftText.length);
+  const right = sliceFormattedText(formatted, leftText.length, formatted.text.length);
+  return [...splitByEntityLimit(left), ...splitByEntityLimit(right)];
+}
+
+function splitTelegramFormattedText(
+  formatted: TelegramFormattedText,
+  maxCodePoints: number,
+): TelegramFormattedText[] {
+  const chunks = splitTelegramText(formatted.text, maxCodePoints);
+  const result: TelegramFormattedText[] = [];
+  let chunkStart = 0;
+  for (const text of chunks) {
+    const chunk = sliceFormattedText(formatted, chunkStart, chunkStart + text.length);
+    result.push(...splitByEntityLimit(chunk));
+    chunkStart += text.length;
+  }
+  return result;
+}
+
 export class TelegramTransport {
   private readonly fetchImpl: typeof undiciFetch;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -175,8 +466,19 @@ export class TelegramTransport {
   }
 
   public async sendMessage(chatId: string | number, text: string): Promise<void> {
-    for (const chunk of splitTelegramText(text, this.maxCodePoints)) {
-      await this.sendMarkdownChunk(String(chatId), chunk);
+    let chunks: TelegramFormattedText[];
+    try {
+      chunks = splitTelegramFormattedText(toTelegramFormattedText(text), this.maxCodePoints);
+    } catch {
+      this.logger.warn("[telegram] Markdown conversion failed; sending plain text");
+      chunks = splitTelegramText(text, this.maxCodePoints).map((chunk) => ({
+        text: chunk,
+        entities: [],
+      }));
+    }
+
+    for (const chunk of chunks) {
+      await this.sendFormattedChunk(String(chatId), chunk);
     }
   }
 
@@ -195,43 +497,29 @@ export class TelegramTransport {
     await this.proxyAgent?.close();
   }
 
-  private async sendMarkdownChunk(chatId: string, text: string): Promise<void> {
-    let markdown: string;
+  private async sendFormattedChunk(
+    chatId: string,
+    formatted: TelegramFormattedText,
+  ): Promise<void> {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      text: formatted.text,
+      ...(formatted.entities.length === 0 ? {} : { entities: formatted.entities }),
+    };
     try {
-      markdown = toTelegramMarkdown(text);
-    } catch {
-      this.logger.warn("[telegram] Markdown conversion failed; sending plain text");
-      await this.request("sendMessage", { chat_id: chatId, text });
-      return;
-    }
-
-    if (Array.from(markdown).length > this.maxCodePoints) {
-      const codePointLength = Array.from(text).length;
-      const smallerLimit = Math.max(1, Math.floor(codePointLength / 2));
-      if (smallerLimit < codePointLength) {
-        for (const smallerChunk of splitTelegramText(text, smallerLimit)) {
-          await this.sendMarkdownChunk(chatId, smallerChunk);
-        }
-        return;
-      }
-    }
-
-    try {
-      await this.request("sendMessage", {
-        chat_id: chatId,
-        text: markdown,
-        parse_mode: "MarkdownV2",
-      });
+      await this.request("sendMessage", body);
     } catch (error) {
-      if (!isMarkdownParseError(error)) {
+      if (!isFormattingEntityError(error) || formatted.entities.length === 0) {
         throw error;
       }
-      this.logger.warn("[telegram] MarkdownV2 rejected; retrying as plain text");
-      await this.request("sendMessage", { chat_id: chatId, text });
+      this.logger.warn(
+        `[telegram] formatting entities rejected (${describeTelegramError(error)}); retrying as plain text`,
+      );
+      await this.request("sendMessage", { chat_id: chatId, text: formatted.text });
     }
   }
 
-  private async request(method: string, body: Record<string, string>): Promise<void> {
+  private async request(method: string, body: Record<string, unknown>): Promise<void> {
     let lastError: TelegramApiError | TelegramTransportClosedError | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       if (this.closed) {

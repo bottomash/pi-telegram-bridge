@@ -5,6 +5,7 @@ import type { BridgeLogger } from "../src/config.js";
 import {
   splitTelegramText,
   TelegramTransport,
+  toTelegramFormattedText,
   toTelegramMarkdown,
 } from "../src/telegram.js";
 
@@ -36,14 +37,14 @@ describe("TelegramTransport", () => {
     await transport.close();
   });
 
-  it("converts standard Markdown and requests Telegram MarkdownV2 parsing", async () => {
-    const bodies: Array<{ chat_id: string; parse_mode?: string; text: string }> = [];
+  it("sends standard Markdown as explicit Telegram entities", async () => {
+    const bodies: Array<{
+      chat_id: string;
+      entities?: Array<{ type: string; offset: number; length: number; url?: string }>;
+      text: string;
+    }> = [];
     const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
-      bodies.push(JSON.parse(String(init?.body)) as {
-        chat_id: string;
-        parse_mode?: string;
-        text: string;
-      });
+      bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
       return okResponse();
     }) as unknown as typeof undiciFetch;
     const transport = new TelegramTransport({ botToken: "token", fetchImpl });
@@ -55,35 +56,106 @@ describe("TelegramTransport", () => {
 
     expect(bodies).toEqual([{
       chat_id: "123",
-      parse_mode: "MarkdownV2",
-      text: "*粗体*、`代码` 和 [链接](https://example.com)",
+      text: "粗体、代码 和 链接",
+      entities: [
+        { type: "bold", offset: 0, length: 2 },
+        { type: "code", offset: 3, length: 2 },
+        { type: "text_link", offset: 8, length: 2, url: "https://example.com" },
+      ],
     }]);
     await transport.close();
   });
 
-  it("falls back to plain text when Telegram rejects Markdown entities", async () => {
-    const bodies: Array<{ chat_id: string; parse_mode?: string; text: string }> = [];
+  it("splits formatted text without cutting or invalidating entities", async () => {
+    const bodies: Array<{
+      chat_id: string;
+      entities?: Array<{ type: string; offset: number; length: number }>;
+      text: string;
+    }> = [];
     const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
-      bodies.push(JSON.parse(String(init?.body)) as {
-        chat_id: string;
-        parse_mode?: string;
-        text: string;
-      });
+      bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+      return okResponse();
+    }) as unknown as typeof undiciFetch;
+    const transport = new TelegramTransport({ botToken: "token", fetchImpl, maxCodePoints: 4 });
+
+    await transport.sendMessage("123", "**甲乙丙丁戊己**");
+
+    expect(bodies).toEqual([
+      {
+        chat_id: "123",
+        text: "甲乙丙丁",
+        entities: [{ type: "bold", offset: 0, length: 4 }],
+      },
+      {
+        chat_id: "123",
+        text: "戊己",
+        entities: [{ type: "bold", offset: 0, length: 2 }],
+      },
+    ]);
+    await transport.close();
+  });
+
+  it("keeps every request within Telegram's 100-entity limit", async () => {
+    const bodies: Array<{
+      entities?: Array<{ type: string; offset: number; length: number }>;
+      text: string;
+    }> = [];
+    const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
+      return okResponse();
+    }) as unknown as typeof undiciFetch;
+    const transport = new TelegramTransport({ botToken: "token", fetchImpl });
+    const message = Array.from({ length: 101 }, (_, index) => `**${index}**`).join(" ");
+
+    await transport.sendMessage("123", message);
+
+    expect(bodies.length).toBeGreaterThan(1);
+    expect(bodies.every((body) => (body.entities?.length ?? 0) <= 100)).toBe(true);
+    expect(bodies.map((body) => body.text).join("")).toBe(
+      Array.from({ length: 101 }, (_, index) => String(index)).join(" "),
+    );
+    await transport.close();
+  });
+
+  it("logs Telegram's reason and falls back when explicit entities are rejected", async () => {
+    const bodies: Array<{
+      chat_id: string;
+      entities?: Array<{ type: string; offset: number; length: number }>;
+      text: string;
+    }> = [];
+    const logs: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as (typeof bodies)[number]);
       return bodies.length === 1
         ? new Response(JSON.stringify({
             ok: false,
-            description: "Bad Request: can't parse entities",
+            description: "Bad Request: can't parse entities at byte offset 4",
           }), { status: 400 })
         : okResponse();
     }) as unknown as typeof undiciFetch;
-    const transport = new TelegramTransport({ botToken: "token", fetchImpl });
+    const transport = new TelegramTransport({
+      botToken: "token",
+      fetchImpl,
+      logger: {
+        info: (message) => logs.push(message),
+        warn: (message) => logs.push(message),
+        error: (message) => logs.push(message),
+      },
+    });
 
     await transport.sendMessage("123", "**粗体**");
 
     expect(bodies).toEqual([
-      { chat_id: "123", parse_mode: "MarkdownV2", text: "*粗体*" },
-      { chat_id: "123", text: "**粗体**" },
+      {
+        chat_id: "123",
+        text: "粗体",
+        entities: [{ type: "bold", offset: 0, length: 2 }],
+      },
+      { chat_id: "123", text: "粗体" },
     ]);
+    expect(logs).toContain(
+      "[telegram] formatting entities rejected (Bad Request: can't parse entities at byte offset 4); retrying as plain text",
+    );
     await transport.close();
   });
 
@@ -186,6 +258,27 @@ describe("Markdown helpers", () => {
     expect(toTelegramMarkdown("plain + dash - dot.")).toBe(
       "plain \\+ dash \\- dot\\.",
     );
+  });
+
+  it("converts nested formatting, links, quotes, and escapes into explicit entities", () => {
+    expect(toTelegramFormattedText(
+      "> **粗体和 _斜体_**\n\n[链接](https://example.com/a_(b)) 与 a_b",
+    )).toEqual({
+      text: "粗体和 斜体\n\n链接 与 a_b",
+      entities: [
+        { type: "bold", offset: 0, length: 6 },
+        { type: "blockquote", offset: 0, length: 6 },
+        { type: "italic", offset: 4, length: 2 },
+        { type: "text_link", offset: 8, length: 2, url: "https://example.com/a_(b)" },
+      ],
+    });
+  });
+
+  it("drops unsupported style overlap while preserving code formatting", () => {
+    expect(toTelegramFormattedText("**before `code` after**")).toEqual({
+      text: "before code after",
+      entities: [{ type: "code", offset: 7, length: 4 }],
+    });
   });
 
   it("does not split surrogate pairs", () => {
