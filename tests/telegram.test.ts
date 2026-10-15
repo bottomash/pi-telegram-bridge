@@ -274,6 +274,23 @@ describe("Markdown helpers", () => {
     });
   });
 
+  it("renders Markdown tables as monospaced preformatted text", () => {
+    const formatted = toTelegramFormattedText([
+      "| Name | Value |",
+      "| --- | ---: |",
+      "| Alpha | 123 |",
+      "| 中文 | 456 |",
+    ].join("\n"));
+
+    expect(formatted.text).toContain("| Name");
+    expect(formatted.text).toContain("| 中文");
+    expect(formatted.entities).toEqual([{
+      type: "pre",
+      offset: 0,
+      length: formatted.text.length,
+    }]);
+  });
+
   it("drops unsupported style overlap while preserving code formatting", () => {
     expect(toTelegramFormattedText("**before `code` after**")).toEqual({
       text: "before code after",

@@ -376,10 +376,52 @@ function parseMarkdownSegment(
   return { ...result, nextIndex: index, closed: false };
 }
 
+function findTableEntities(text: string): TelegramMessageEntity[] {
+  const lines = text.split("\n");
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    starts.push(offset);
+    offset += line.length + 1;
+  }
+
+  const isTableRow = (line: string): boolean => /^\s*\|.*\|\s*$/u.test(line);
+  const isSeparator = (line: string): boolean =>
+    /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/u.test(line);
+  const entities: TelegramMessageEntity[] = [];
+
+  for (let index = 1; index < lines.length; index += 1) {
+    const header = lines[index - 1];
+    const separator = lines[index];
+    if (header === undefined || separator === undefined ||
+        !isTableRow(header) || !isSeparator(separator)) {
+      continue;
+    }
+
+    let endLine = index + 1;
+    while (endLine < lines.length && isTableRow(lines[endLine] ?? "")) {
+      endLine += 1;
+    }
+    const start = starts[index - 1];
+    if (start === undefined) {
+      continue;
+    }
+    const end = endLine < lines.length
+      ? (starts[endLine] ?? text.length) - 1
+      : text.length;
+    if (end > start) {
+      entities.push({ type: "pre", offset: start, length: end - start });
+    }
+    index = endLine - 1;
+  }
+  return entities;
+}
+
 /** Convert standard Markdown into plain text plus Bot API entities, avoiding parse_mode ambiguity. */
 export function toTelegramFormattedText(text: string): TelegramFormattedText {
   const markdown = toTelegramMarkdown(text);
   const parsed = parseMarkdownSegment(markdown);
+  parsed.entities.push(...findTableEntities(parsed.text));
   const codeRanges = parsed.entities
     .filter((entity) => entity.type === "code" || entity.type === "pre")
     .map((entity) => [entity.offset, entity.offset + entity.length] as const);
