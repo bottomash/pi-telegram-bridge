@@ -19,6 +19,7 @@ import {
 } from "./config.js";
 import { UpdateDedupe } from "./dedupe.js";
 import { createPiBridge, PiAgentBridge } from "./pi.js";
+import { LongPollingReceiver } from "./polling.js";
 import { FifoQueue, QueueClosedError } from "./queue.js";
 import { WebhookServer } from "./server.js";
 import {
@@ -95,12 +96,23 @@ export async function processTelegramJob(
   }
 }
 
+interface UpdateReceiver {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+}
+
 interface ActiveRuntime {
   profileName: string;
   config: BridgeConfig;
-  server: WebhookServer;
+  receiver: UpdateReceiver;
   queue: FifoQueue<void>;
   transport: TelegramTransport;
+}
+
+function runtimeDescription(runtime: ActiveRuntime): string {
+  return runtime.config.mode === "webhook"
+    ? `Webhook http://${runtime.config.host}:${runtime.config.port}`
+    : "Long Polling";
 }
 
 async function stopRuntime(
@@ -109,9 +121,9 @@ async function stopRuntime(
   logger: BridgeLogger,
 ): Promise<void> {
   try {
-    await runtime.server.stop();
+    await runtime.receiver.stop();
   } catch {
-    logger.error("[telegram] webhook server shutdown failed");
+    logger.error("[telegram] update receiver shutdown failed");
   }
   runtime.queue.close();
   piBridge.stop();
@@ -134,25 +146,32 @@ function createRuntime(
     logger,
     ...(config.telegramProxy === undefined ? {} : { proxy: config.telegramProxy }),
   });
-  const dedupe = new UpdateDedupe(1000);
-  const server = new WebhookServer({
-    host: config.host,
-    port: config.port,
-    webhookSecret: config.webhookSecret,
-    allowedChatId: config.allowedChatId,
-    dedupe,
-    logger,
-    onMessage: (job) => {
-      void queue
-        .enqueue(() => processTelegramJob(job, piBridge, transport, logger))
-        .catch((error: unknown) => {
-          if (!(error instanceof QueueClosedError)) {
-            logger.error("[telegram] queued task failed");
-          }
-        });
-    },
-  });
-  return { profileName, config, server, queue, transport };
+  const onMessage = (job: TelegramJob): void => {
+    void queue
+      .enqueue(() => processTelegramJob(job, piBridge, transport, logger))
+      .catch((error: unknown) => {
+        if (!(error instanceof QueueClosedError)) {
+          logger.error("[telegram] queued task failed");
+        }
+      });
+  };
+  const receiver: UpdateReceiver = config.mode === "webhook"
+    ? new WebhookServer({
+        host: config.host,
+        port: config.port,
+        webhookSecret: config.webhookSecret,
+        allowedChatId: config.allowedChatId,
+        dedupe: new UpdateDedupe(1000),
+        logger,
+        onMessage,
+      })
+    : new LongPollingReceiver({
+        transport,
+        allowedChatId: config.allowedChatId,
+        logger,
+        onMessage,
+      });
+  return { profileName, config, receiver, queue, transport };
 }
 
 export default function telegramBridgeExtension(pi: ExtensionAPI): void {
@@ -173,12 +192,12 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
     piBridge.start(context);
     const nextRuntime = createRuntime(profileName, config, piBridge, logger);
     try {
-      await nextRuntime.server.start();
+      await nextRuntime.receiver.start();
       runtime = nextRuntime;
       return true;
     } catch (error) {
       await stopRuntime(nextRuntime, piBridge, logger);
-      logger.error(`[telegram] webhook server failed: ${safeErrorLabel(error)}`);
+      logger.error(`[telegram] update receiver failed: ${safeErrorLabel(error)}`);
       return false;
     }
   };
@@ -204,7 +223,7 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         if (runtime !== undefined) {
           context.ui.notify(
             runtime.profileName === profileName
-              ? `Bot ${profileName} 已在 http://${runtime.config.host}:${runtime.config.port} 运行`
+              ? `Bot ${profileName} 已通过 ${runtimeDescription(runtime)} 运行`
               : `Bot ${runtime.profileName} 正在运行，请先执行 /pi-telegram-bridge down`,
             "info",
           );
@@ -226,7 +245,7 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
 
         if (await activate(profileName, config, context)) {
           context.ui.notify(
-            `Bot ${profileName} 已启动：http://${config.host}:${config.port}`,
+            `Bot ${profileName} 已启动：${runtimeDescription(runtime!)}`,
             "info",
           );
         } else {
@@ -252,7 +271,7 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         context.ui.notify(
           runtime === undefined
             ? "Telegram Bridge 当前未运行"
-            : `Bot ${runtime.profileName} 正在 http://${runtime.config.host}:${runtime.config.port} 运行`,
+            : `Bot ${runtime.profileName} 正通过 ${runtimeDescription(runtime)} 运行`,
           "info",
         );
         return;
@@ -306,7 +325,7 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("pi-telegram-bridge-setup", {
-    description: "配置 Bot、Webhook、目录绑定和系统自动启动",
+    description: "配置 Bot、接收方式、目录绑定和系统自动启动",
     handler: async (args: string, context: ExtensionCommandContext) => {
       if (!context.hasUI) {
         logger.error("[telegram] setup requires an interactive UI");
@@ -365,6 +384,18 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         return;
       }
 
+      const webhookChoice = "国内网络：Webhook";
+      const pollingChoice = "国外网络：Long Polling";
+      const currentMode = environment.TELEGRAM_MODE?.trim().toLowerCase() || saved?.mode;
+      const choices = currentMode === "polling"
+        ? [pollingChoice, webhookChoice]
+        : [webhookChoice, pollingChoice];
+      const modeChoice = await context.ui.select("Telegram 接收方式", choices);
+      if (modeChoice === undefined) {
+        return;
+      }
+      const mode = modeChoice === pollingChoice ? "polling" : "webhook";
+
       const useProxy = await context.ui.confirm(
         "Telegram 代理",
         "是否通过 HTTP/HTTPS 代理访问 Telegram Bot API？",
@@ -385,56 +416,68 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         }
       }
 
-      // Tunnel 与 Bridge 默认在同一台机器，普通配置无需暴露监听地址。
-      // 已有的高级配置仍会保留；新配置固定使用安全的回环地址。
-      const host = saved?.host ?? DEFAULT_HOST;
+      let webhookUrl: string | undefined;
+      let webhookSecret: string | undefined;
+      let host: string | undefined;
+      let portText: string | undefined;
+      if (mode === "webhook") {
+        // Tunnel 与 Bridge 默认在同一台机器，普通配置无需暴露监听地址。
+        host = saved?.host ?? DEFAULT_HOST;
+        const portInput = await context.ui.input(
+          "Webhook 监听端口",
+          String(saved?.port ?? DEFAULT_PORT),
+        );
+        if (portInput === undefined) {
+          return;
+        }
+        portText = portInput.trim() || String(saved?.port ?? DEFAULT_PORT);
 
-      const portInput = await context.ui.input(
-        "Webhook 监听端口",
-        String(saved?.port ?? DEFAULT_PORT),
-      );
-      if (portInput === undefined) {
-        return;
+        const webhookUrlInput = await context.ui.input(
+          "Telegram 公网 Webhook URL",
+          saved?.webhookUrl ?? "例如 https://tg.example.com/telegram/webhook",
+        );
+        if (webhookUrlInput === undefined) {
+          return;
+        }
+        try {
+          webhookUrl = validateWebhookUrl(webhookUrlInput.trim() || saved?.webhookUrl || "");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "invalid Webhook URL";
+          context.ui.notify(`Webhook URL 无效：${message}`, "error");
+          return;
+        }
+        webhookSecret = currentWebhookSecret ?? generateWebhookSecret();
       }
-      const portText = portInput.trim() || String(saved?.port ?? DEFAULT_PORT);
-
-      const webhookUrlInput = await context.ui.input(
-        "Telegram 公网 Webhook URL",
-        saved?.webhookUrl ?? "例如 https://tg.example.com/telegram/webhook",
-      );
-      if (webhookUrlInput === undefined) {
-        return;
-      }
-
-      let webhookUrl: string;
-      try {
-        webhookUrl = validateWebhookUrl(webhookUrlInput.trim() || saved?.webhookUrl || "");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "invalid Webhook URL";
-        context.ui.notify(`Webhook URL 无效：${message}`, "error");
-        return;
-      }
-
-      const webhookSecret = currentWebhookSecret ?? generateWebhookSecret();
 
       let config: BridgeConfig;
       try {
         config = loadConfig({
+          TELEGRAM_MODE: mode,
           TELEGRAM_BOT_TOKEN: botToken,
           TELEGRAM_ALLOWED_CHAT_ID: allowedChatId,
-          TELEGRAM_WEBHOOK_SECRET: webhookSecret,
-          TELEGRAM_HOST: host,
-          TELEGRAM_PORT: portText,
+          ...(webhookSecret === undefined ? {} : { TELEGRAM_WEBHOOK_SECRET: webhookSecret }),
+          ...(host === undefined ? {} : { TELEGRAM_HOST: host }),
+          ...(portText === undefined ? {} : { TELEGRAM_PORT: portText }),
           ...(proxy === undefined ? {} : { TELEGRAM_PROXY: proxy }),
         });
-        await credentialStore.save({ botToken, webhookSecret }, profileName);
-        await saveConfig({
-          allowedChatId: config.allowedChatId,
-          host: config.host,
-          port: config.port,
-          webhookUrl,
-          ...(config.telegramProxy === undefined ? {} : { proxy: config.telegramProxy }),
-        }, configPath);
+        await credentialStore.save({
+          botToken,
+          ...(config.mode === "webhook" ? { webhookSecret: config.webhookSecret } : {}),
+        }, profileName);
+        await saveConfig(config.mode === "webhook"
+          ? {
+              mode: "webhook",
+              allowedChatId: config.allowedChatId,
+              host: config.host,
+              port: config.port,
+              ...(webhookUrl === undefined ? {} : { webhookUrl }),
+              ...(config.telegramProxy === undefined ? {} : { proxy: config.telegramProxy }),
+            }
+          : {
+              mode: "polling",
+              allowedChatId: config.allowedChatId,
+              ...(config.telegramProxy === undefined ? {} : { proxy: config.telegramProxy }),
+            }, configPath);
       } catch (error) {
         const message = error instanceof Error ? error.message : "unknown error";
         context.ui.notify(`配置保存失败：${message}`, "error");
@@ -453,11 +496,20 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         ...(config.telegramProxy === undefined ? {} : { proxy: config.telegramProxy }),
       });
       try {
-        await registrationTransport.setWebhook(webhookUrl, webhookSecret);
+        if (config.mode === "webhook") {
+          if (webhookUrl === undefined) {
+            throw new Error("missing Webhook URL");
+          }
+          await registrationTransport.setWebhook(webhookUrl, config.webhookSecret);
+        } else {
+          await registrationTransport.deleteWebhook();
+        }
       } catch (error) {
-        logger.error(`[telegram] setWebhook failed: ${safeErrorLabel(error)}`);
+        logger.error(`[telegram] receiver registration failed: ${safeErrorLabel(error)}`);
         context.ui.notify(
-          "配置已保存，但 Telegram Webhook 注册失败，请检查日志",
+          config.mode === "webhook"
+            ? "配置已保存，但 Telegram Webhook 注册失败，请检查日志"
+            : "配置已保存，但无法停用旧 Webhook，请检查日志",
           "error",
         );
         return;
@@ -530,7 +582,9 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
       }
 
       const summary = [
-        `Bot ${profileName} 已保存并注册 Webhook`,
+        config.mode === "webhook"
+          ? `Bot ${profileName} 已保存并注册 Webhook`
+          : `Bot ${profileName} 已保存并启用 Long Polling`,
         `Bridge 随 Pi 启动：${enableBridgeAutostart ? "是" : "否"}`,
         ...(workingDirectory === undefined ? [] : [`Pi 工作目录：${workingDirectory}`]),
         ...(process.platform !== "win32" || !enableBridgeAutostart

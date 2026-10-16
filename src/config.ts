@@ -20,14 +20,27 @@ export const quietConsoleLogger: BridgeLogger = {
   error: (message) => console.error(message),
 };
 
-export interface BridgeConfig {
+export type BridgeMode = "webhook" | "polling";
+
+interface CommonBridgeConfig {
+  mode: BridgeMode;
   botToken: string;
   allowedChatId: string;
+  telegramProxy?: string;
+}
+
+export interface WebhookBridgeConfig extends CommonBridgeConfig {
+  mode: "webhook";
   webhookSecret: string;
   host: string;
   port: number;
-  telegramProxy?: string;
 }
+
+export interface PollingBridgeConfig extends CommonBridgeConfig {
+  mode: "polling";
+}
+
+export type BridgeConfig = WebhookBridgeConfig | PollingBridgeConfig;
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();
@@ -57,6 +70,14 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
+function parseMode(value: string | undefined): BridgeMode {
+  const mode = value?.trim().toLowerCase() || "webhook";
+  if (mode !== "webhook" && mode !== "polling") {
+    throw new Error("TELEGRAM_MODE must be webhook or polling");
+  }
+  return mode;
+}
+
 function parseProxy(value: string | undefined): string | undefined {
   const proxy = value?.trim();
   if (!proxy) {
@@ -77,26 +98,28 @@ function parseProxy(value: string | undefined): string | undefined {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
+  const mode = parseMode(env.TELEGRAM_MODE);
   const botToken = required(env, "TELEGRAM_BOT_TOKEN");
   const allowedChatId = required(env, "TELEGRAM_ALLOWED_CHAT_ID");
-  const webhookSecret = required(env, "TELEGRAM_WEBHOOK_SECRET");
-  const host = parseHost(env.TELEGRAM_HOST);
-  const port = parsePort(env.TELEGRAM_PORT);
   const telegramProxy = parseProxy(env.TELEGRAM_PROXY);
 
   if (!/^-?\d+$/.test(allowedChatId)) {
     throw new Error("TELEGRAM_ALLOWED_CHAT_ID must be a numeric chat ID");
   }
 
-  const config: BridgeConfig = {
+  const common = {
     botToken,
     allowedChatId,
-    webhookSecret,
-    host,
-    port,
+    ...(telegramProxy === undefined ? {} : { telegramProxy }),
   };
-  if (telegramProxy !== undefined) {
-    config.telegramProxy = telegramProxy;
+  if (mode === "polling") {
+    return { ...common, mode: "polling" };
   }
-  return config;
+  return {
+    ...common,
+    mode: "webhook",
+    webhookSecret: required(env, "TELEGRAM_WEBHOOK_SECRET"),
+    host: parseHost(env.TELEGRAM_HOST),
+    port: parsePort(env.TELEGRAM_PORT),
+  };
 }

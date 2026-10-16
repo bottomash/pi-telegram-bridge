@@ -531,6 +531,30 @@ export class TelegramTransport {
     });
   }
 
+  public async deleteWebhook(): Promise<void> {
+    await this.request("deleteWebhook", { drop_pending_updates: false });
+  }
+
+  public async getUpdates(
+    offset: number | undefined,
+    timeoutSeconds: number,
+    signal?: AbortSignal,
+  ): Promise<TelegramUpdate[]> {
+    const result = await this.request("getUpdates", {
+      ...(offset === undefined ? {} : { offset }),
+      timeout: timeoutSeconds,
+      allowed_updates: ["message"],
+    }, signal);
+    if (!Array.isArray(result)) {
+      throw new TelegramApiError(200, undefined, "invalid getUpdates result");
+    }
+    return result.filter((value): value is TelegramUpdate => Boolean(
+      value &&
+      typeof value === "object" &&
+      Number.isSafeInteger((value as Partial<TelegramUpdate>).update_id),
+    ));
+  }
+
   public async close(): Promise<void> {
     if (this.closed) {
       return;
@@ -561,7 +585,11 @@ export class TelegramTransport {
     }
   }
 
-  private async request(method: string, body: Record<string, unknown>): Promise<void> {
+  private async request(
+    method: string,
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     let lastError: TelegramApiError | TelegramTransportClosedError | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       if (this.closed) {
@@ -575,6 +603,7 @@ export class TelegramTransport {
             "content-type": "application/json",
           },
           body: JSON.stringify(body),
+          ...(signal === undefined ? {} : { signal }),
         };
         if (this.proxyAgent !== undefined) {
           (init as typeof init & { dispatcher?: Dispatcher }).dispatcher = this.proxyAgent;
@@ -589,12 +618,15 @@ export class TelegramTransport {
         }
 
         if (response.ok && isSuccessfulPayload(payload)) {
-          return;
+          return (payload as TelegramApiPayload).result;
         }
 
         const retryAfter = response.status === 429 ? asRetryAfter(payload) : undefined;
         throw new TelegramApiError(response.status, retryAfter, asDescription(payload));
       } catch (error) {
+        if (signal?.aborted === true) {
+          throw new TelegramTransportClosedError();
+        }
         lastError = error instanceof TelegramTransportClosedError
           ? error
           : error instanceof TelegramApiError

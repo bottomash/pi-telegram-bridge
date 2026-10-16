@@ -66,7 +66,7 @@ class BodyTooLargeError extends Error {
   }
 }
 
-function parseUpdate(value: unknown): TelegramUpdate | undefined {
+export function parseTelegramUpdate(value: unknown): TelegramUpdate | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
   }
@@ -77,7 +77,10 @@ function parseUpdate(value: unknown): TelegramUpdate | undefined {
   return update as TelegramUpdate;
 }
 
-function toJob(update: TelegramUpdate, allowedChatId: string): TelegramJob | undefined {
+export function telegramUpdateToJob(
+  update: TelegramUpdate,
+  allowedChatId: string,
+): TelegramJob | undefined {
   const message = update.message;
   if (!message || message.chat?.type !== "private") {
     return undefined;
@@ -156,7 +159,7 @@ export async function handleWebhookRequest(
     return;
   }
 
-  const update = parseUpdate(parsed);
+  const update = parseTelegramUpdate(parsed);
   if (update === undefined) {
     writeStatus(response, 400);
     return;
@@ -166,7 +169,7 @@ export async function handleWebhookRequest(
     return;
   }
 
-  const job = toJob(update, options.allowedChatId);
+  const job = telegramUpdateToJob(update, options.allowedChatId);
   if (job !== undefined) {
     logger.info(`[telegram] message received update_id=${job.updateId}`);
     enqueueSafely(job, options, logger);

@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import { AsyncEntry } from "@napi-rs/keyring";
 
-import { loadConfig, type BridgeConfig } from "./config.js";
+import { loadConfig, type BridgeConfig, type BridgeMode } from "./config.js";
 
 export const CREDENTIAL_SERVICE = "pi-telegram-bridge";
 export const BOT_TOKEN_ACCOUNT = "bot-token";
@@ -16,12 +16,18 @@ export const DEFAULT_CONFIG_PATH = join(DEFAULT_CONFIG_DIRECTORY, "config.json")
 export const DEFAULT_AUTOSTART_PATH = join(DEFAULT_CONFIG_DIRECTORY, "autostart.json");
 
 export interface SavedBridgeConfig {
+  mode: BridgeMode;
   allowedChatId: string;
-  host: string;
-  port: number;
+  host?: string;
+  port?: number;
   proxy?: string;
   webhookUrl?: string;
 }
+
+export type SavedBridgeConfigInput = Omit<SavedBridgeConfig, "mode"> & {
+  /** Missing mode is accepted for compatibility with pre-polling configuration files. */
+  mode?: BridgeMode;
+};
 
 export interface StoredSecrets {
   botToken?: string;
@@ -30,7 +36,7 @@ export interface StoredSecrets {
 
 export interface CredentialStore {
   load(profileName?: string): Promise<StoredSecrets>;
-  save(secrets: { botToken: string; webhookSecret: string }, profileName?: string): Promise<void>;
+  save(secrets: { botToken: string; webhookSecret?: string }, profileName?: string): Promise<void>;
 }
 
 function credentialAccount(base: string, profileName: string): string {
@@ -50,14 +56,16 @@ export class SystemCredentialStore implements CredentialStore {
   }
 
   public async save(
-    secrets: { botToken: string; webhookSecret: string },
+    secrets: { botToken: string; webhookSecret?: string },
     profileName = DEFAULT_PROFILE_NAME,
   ): Promise<void> {
     await Promise.all([
       new AsyncEntry(CREDENTIAL_SERVICE, credentialAccount(BOT_TOKEN_ACCOUNT, profileName))
         .setPassword(secrets.botToken),
-      new AsyncEntry(CREDENTIAL_SERVICE, credentialAccount(WEBHOOK_SECRET_ACCOUNT, profileName))
-        .setPassword(secrets.webhookSecret),
+      ...(secrets.webhookSecret === undefined
+        ? []
+        : [new AsyncEntry(CREDENTIAL_SERVICE, credentialAccount(WEBHOOK_SECRET_ACCOUNT, profileName))
+            .setPassword(secrets.webhookSecret)]),
     ]);
   }
 }
@@ -143,8 +151,14 @@ function parseSavedConfig(value: unknown): SavedBridgeConfig {
     throw new Error("saved Telegram configuration must be an object");
   }
   const candidate = value as Partial<SavedBridgeConfig>;
+  const modeValue = (value as { mode?: unknown }).mode;
+  if (modeValue !== undefined && modeValue !== "webhook" && modeValue !== "polling") {
+    throw new Error("saved Telegram mode must be webhook or polling");
+  }
+  const mode = modeValue ?? "webhook";
   const webhookUrlValue = (value as { webhookUrl?: unknown }).webhookUrl;
   const env: NodeJS.ProcessEnv = {
+    TELEGRAM_MODE: mode,
     TELEGRAM_BOT_TOKEN: "validation-placeholder",
     TELEGRAM_WEBHOOK_SECRET: "validation-placeholder",
     TELEGRAM_ALLOWED_CHAT_ID: candidate.allowedChatId,
@@ -156,10 +170,18 @@ function parseSavedConfig(value: unknown): SavedBridgeConfig {
   if (webhookUrlValue !== undefined && typeof webhookUrlValue !== "string") {
     throw new Error("Webhook URL must be a string");
   }
+  if (validated.mode === "polling") {
+    return {
+      mode: "polling",
+      allowedChatId: validated.allowedChatId,
+      ...(validated.telegramProxy === undefined ? {} : { proxy: validated.telegramProxy }),
+    };
+  }
   const webhookUrl = webhookUrlValue === undefined
     ? undefined
     : validateWebhookUrl(webhookUrlValue);
   return {
+    mode: "webhook",
     allowedChatId: validated.allowedChatId,
     host: validated.host,
     port: validated.port,
@@ -205,7 +227,7 @@ async function writeJsonAtomically(path: string, value: unknown): Promise<void> 
 }
 
 export async function saveConfig(
-  config: SavedBridgeConfig,
+  config: SavedBridgeConfigInput,
   path = DEFAULT_CONFIG_PATH,
 ): Promise<void> {
   await writeJsonAtomically(path, parseSavedConfig(config));
@@ -229,18 +251,22 @@ export async function loadEffectiveConfig(
   const configPath = options.configPath
     ?? profileConfigPath(profileName, options.configDirectory ?? DEFAULT_CONFIG_DIRECTORY);
   const saved = await readSavedConfig(configPath);
-  const needsBotToken = !env.TELEGRAM_BOT_TOKEN?.trim();
-  const needsWebhookSecret = !env.TELEGRAM_WEBHOOK_SECRET?.trim();
+  const merged: NodeJS.ProcessEnv = { ...env };
+  merged.TELEGRAM_MODE ||= saved?.mode;
+  const mode = merged.TELEGRAM_MODE?.trim().toLowerCase() || "webhook";
+  const needsBotToken = !merged.TELEGRAM_BOT_TOKEN?.trim();
+  const needsWebhookSecret = mode === "webhook" && !merged.TELEGRAM_WEBHOOK_SECRET?.trim();
   const secrets = needsBotToken || needsWebhookSecret
     ? await (options.credentialStore ?? new SystemCredentialStore()).load(profileName)
     : {};
 
-  const merged: NodeJS.ProcessEnv = { ...env };
   merged.TELEGRAM_BOT_TOKEN ||= secrets.botToken;
-  merged.TELEGRAM_WEBHOOK_SECRET ||= secrets.webhookSecret;
+  if (mode === "webhook") {
+    merged.TELEGRAM_WEBHOOK_SECRET ||= secrets.webhookSecret;
+  }
   merged.TELEGRAM_ALLOWED_CHAT_ID ||= saved?.allowedChatId;
   merged.TELEGRAM_HOST ??= saved?.host;
-  merged.TELEGRAM_PORT ??= saved === undefined ? undefined : String(saved.port);
+  merged.TELEGRAM_PORT ??= saved?.port === undefined ? undefined : String(saved.port);
   merged.TELEGRAM_PROXY ??= saved?.proxy;
   return loadConfig(merged);
 }

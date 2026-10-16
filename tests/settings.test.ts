@@ -55,6 +55,7 @@ describe("persistent Telegram configuration", () => {
     }, configPath);
 
     await expect(readSavedConfig(configPath)).resolves.toEqual({
+      mode: "webhook",
       allowedChatId: "123456789",
       host: "127.0.0.1",
       port: 8787,
@@ -76,6 +77,7 @@ describe("persistent Telegram configuration", () => {
       configPath,
       credentialStore,
     })).resolves.toEqual({
+      mode: "webhook",
       botToken: "stored-token",
       allowedChatId: "123456789",
       webhookSecret: "stored-secret",
@@ -112,6 +114,7 @@ describe("persistent Telegram configuration", () => {
     });
 
     expect(config).toEqual({
+      mode: "webhook",
       botToken: "environment-token",
       allowedChatId: "222",
       webhookSecret: "environment-secret",
@@ -146,6 +149,7 @@ describe("persistent Telegram configuration", () => {
         save: async () => undefined,
       },
     })).resolves.toEqual({
+      mode: "webhook",
       botToken: "beancount-token",
       allowedChatId: "333",
       webhookSecret: "beancount-secret",
@@ -153,6 +157,52 @@ describe("persistent Telegram configuration", () => {
       port: 9999,
     });
     await expect(listProfiles(configDirectory)).resolves.toEqual(["beancount"]);
+  });
+
+  it("loads polling mode from only its required environment variables", async () => {
+    const configPath = await temporaryConfigPath();
+    await expect(loadEffectiveConfig({
+      env: {
+        TELEGRAM_MODE: "polling",
+        TELEGRAM_BOT_TOKEN: "polling-token",
+        TELEGRAM_ALLOWED_CHAT_ID: "123456789",
+      },
+      configPath,
+      credentialStore: {
+        load: async () => { throw new Error("credential store should not be read"); },
+        save: async () => undefined,
+      },
+    })).resolves.toEqual({
+      mode: "polling",
+      botToken: "polling-token",
+      allowedChatId: "123456789",
+    });
+  });
+
+  it("loads polling mode without requiring webhook-only settings or secrets", async () => {
+    const configPath = await temporaryConfigPath();
+    await saveConfig({
+      mode: "polling",
+      allowedChatId: "123456789",
+    }, configPath);
+    const pollingCredentials: CredentialStore = {
+      load: async () => ({ botToken: "polling-token" }),
+      save: async () => undefined,
+    };
+
+    await expect(loadEffectiveConfig({
+      env: {},
+      configPath,
+      credentialStore: pollingCredentials,
+    })).resolves.toEqual({
+      mode: "polling",
+      botToken: "polling-token",
+      allowedChatId: "123456789",
+    });
+    await expect(readSavedConfig(configPath)).resolves.toEqual({
+      mode: "polling",
+      allowedChatId: "123456789",
+    });
   });
 
   it("binds one Bot profile to a working directory for automatic startup", async () => {

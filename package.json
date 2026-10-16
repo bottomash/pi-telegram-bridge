@@ -1,7 +1,7 @@
 {
   "name": "pi-telegram-bridge",
   "version": "0.1.0",
-  "description": "A small final-only Telegram webhook bridge for Pi Agent",
+  "description": "A small final-only Telegram webhook and long-polling bridge for Pi Agent",
   "license": "MIT",
   "repository": {
     "type": "git",
