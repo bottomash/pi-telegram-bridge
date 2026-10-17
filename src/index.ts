@@ -357,6 +357,19 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         environment.TELEGRAM_WEBHOOK_SECRET?.trim() || existingSecrets.webhookSecret;
       const currentChatId = environment.TELEGRAM_ALLOWED_CHAT_ID?.trim() || saved?.allowedChatId;
 
+      // Webhook 和 Long Polling 是两套独立的配置流程，必须先选择模式。
+      const webhookChoice = "Webhook";
+      const pollingChoice = "Long Polling";
+      const currentMode = environment.TELEGRAM_MODE?.trim().toLowerCase() || saved?.mode;
+      const choices = currentMode === "polling"
+        ? [pollingChoice, webhookChoice]
+        : [webhookChoice, pollingChoice];
+      const modeChoice = await context.ui.select("运行模式", choices);
+      if (modeChoice === undefined) {
+        return;
+      }
+      const mode = modeChoice === pollingChoice ? "polling" : "webhook";
+
       context.ui.notify("Bot Token 输入时会显示在终端中，请确认周围无人旁观", "warning");
       const tokenInput = await context.ui.input(
         "Telegram Bot Token",
@@ -383,18 +396,6 @@ export default function telegramBridgeExtension(pi: ExtensionAPI): void {
         context.ui.notify("Telegram Chat ID 不能为空", "error");
         return;
       }
-
-      const webhookChoice = "国内网络：Webhook";
-      const pollingChoice = "国外网络：Long Polling";
-      const currentMode = environment.TELEGRAM_MODE?.trim().toLowerCase() || saved?.mode;
-      const choices = currentMode === "polling"
-        ? [pollingChoice, webhookChoice]
-        : [webhookChoice, pollingChoice];
-      const modeChoice = await context.ui.select("Telegram 接收方式", choices);
-      if (modeChoice === undefined) {
-        return;
-      }
-      const mode = modeChoice === pollingChoice ? "polling" : "webhook";
 
       const useProxy = await context.ui.confirm(
         "Telegram 代理",
