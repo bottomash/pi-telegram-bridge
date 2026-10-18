@@ -3,7 +3,12 @@ import { timingSafeEqual } from "node:crypto";
 
 import { type BridgeLogger, consoleLogger } from "./config.js";
 import { UpdateDedupe } from "./dedupe.js";
-import type { TelegramJob, TelegramUpdate } from "./telegram.js";
+import {
+  DEFAULT_ACCOUNTING_IMAGE_PROMPT,
+  type TelegramJob,
+  type TelegramPhotoSize,
+  type TelegramUpdate,
+} from "./telegram.js";
 
 export const WEBHOOK_PATH = "/telegram/webhook";
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
@@ -77,6 +82,21 @@ export function parseTelegramUpdate(value: unknown): TelegramUpdate | undefined 
   return update as TelegramUpdate;
 }
 
+function bestPhoto(photos: readonly TelegramPhotoSize[]): TelegramPhotoSize | undefined {
+  return photos
+    .filter((photo) => typeof photo.file_id === "string" && photo.file_id.length > 0)
+    .reduce<TelegramPhotoSize | undefined>((best, photo) => {
+      if (best === undefined) {
+        return photo;
+      }
+      const area = (photo.width ?? 0) * (photo.height ?? 0);
+      const bestArea = (best.width ?? 0) * (best.height ?? 0);
+      return area > bestArea || (area === bestArea && (photo.file_size ?? 0) > (best.file_size ?? 0))
+        ? photo
+        : best;
+    }, undefined);
+}
+
 export function telegramUpdateToJob(
   update: TelegramUpdate,
   allowedChatId: string,
@@ -89,13 +109,27 @@ export function telegramUpdateToJob(
   if ((typeof chatId !== "number" && typeof chatId !== "string") || String(chatId) !== allowedChatId) {
     return undefined;
   }
-  if (typeof message.text !== "string") {
+  if (typeof message.text === "string") {
+    return {
+      updateId: update.update_id,
+      chatId: String(chatId),
+      text: message.text,
+    };
+  }
+
+  const photo = Array.isArray(message.photo) ? bestPhoto(message.photo) : undefined;
+  if (typeof photo?.file_id !== "string") {
     return undefined;
   }
+  const caption = typeof message.caption === "string" ? message.caption.trim() : "";
   return {
     updateId: update.update_id,
     chatId: String(chatId),
-    text: message.text,
+    text: caption || DEFAULT_ACCOUNTING_IMAGE_PROMPT,
+    image: {
+      fileId: photo.file_id,
+      mimeType: "image/jpeg",
+    },
   };
 }
 

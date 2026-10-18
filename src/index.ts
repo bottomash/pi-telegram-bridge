@@ -18,7 +18,7 @@ import {
   type BridgeLogger,
 } from "./config.js";
 import { UpdateDedupe } from "./dedupe.js";
-import { createPiBridge, PiAgentBridge } from "./pi.js";
+import { createPiBridge, PiAgentBridge, type PiPrompt } from "./pi.js";
 import { LongPollingReceiver } from "./polling.js";
 import { FifoQueue, QueueClosedError } from "./queue.js";
 import { WebhookServer } from "./server.js";
@@ -42,6 +42,7 @@ import {
   TelegramApiError,
   TelegramTransport,
   TelegramTransportClosedError,
+  type TelegramImageContent,
   type TelegramJob,
 } from "./telegram.js";
 import { installWindowsAutostart, removeWindowsAutostart } from "./windows-autostart.js";
@@ -49,11 +50,12 @@ import { installWindowsAutostart, removeWindowsAutostart } from "./windows-autos
 export const PI_FAILURE_MESSAGE = "Pi 执行任务失败，请稍后重试。";
 
 export interface PiRunner {
-  run(prompt: string): Promise<{ text: string }>;
+  run(prompt: PiPrompt): Promise<{ text: string }>;
 }
 
 export interface TelegramSender {
   sendMessage(chatId: string | number, text: string): Promise<void>;
+  downloadImage?(fileId: string): Promise<TelegramImageContent>;
 }
 
 function safeErrorLabel(error: unknown): string {
@@ -83,7 +85,18 @@ export async function processTelegramJob(
   logger.info("[pi] processing telegram message");
   let reply: string;
   try {
-    reply = (await piRunner.run(job.text)).text;
+    let prompt: PiPrompt = job.text;
+    if (job.image !== undefined) {
+      if (telegram.downloadImage === undefined) {
+        throw new Error("Telegram image download is unavailable");
+      }
+      const image = await telegram.downloadImage(job.image.fileId);
+      prompt = [
+        { type: "text", text: job.text },
+        image,
+      ];
+    }
+    reply = (await piRunner.run(prompt)).text;
   } catch {
     reply = PI_FAILURE_MESSAGE;
   }

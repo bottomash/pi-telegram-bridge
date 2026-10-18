@@ -1,14 +1,15 @@
 # Pi Telegram Bridge
 
-一个只做单用户、纯文字、final-only 的轻量级 Telegram Bridge。国内网络可手动选择 Webhook，国外网络可手动选择 Long Polling；每个命名 Bot 配置独立保存接收方式。
+一个只做单用户、final-only 的轻量级 Telegram Bridge，支持纯文字和普通照片。国内网络可手动选择 Webhook，国外网络可手动选择 Long Polling；每个命名 Bot 配置独立保存接收方式。
 
-链路：Telegram Webhook / Long Polling → Pi → 等待 `agent_settled` → Telegram `sendMessage`。
+链路：Telegram Webhook / Long Polling → 下载照片 → Pi 多模态消息 → 等待 `agent_settled` → Telegram `sendMessage`。
 
 ## 核心特性
 
 - 配置时手动选择“国内网络：Webhook”或“国外网络：Long Polling”。
 - 两种模式收到消息后都由 FIFO 队列依次提交给 Pi。
 - 只把 Pi 最终回复发送到 Telegram，不发送思考过程、工具调用或工作日志。
+- 支持 Telegram 普通照片：选择最高分辨率版本下载并交给 Pi；照片说明会作为提示词，无说明时默认要求识别账单、发票或支付信息并按当前项目规则处理记账。
 - 保留常用 Markdown 格式，自动处理长消息、表格和 Telegram 格式限制。
 - 两种模式都限制到一个 Telegram 私聊 Chat ID；Webhook 额外校验 Secret。
 - 支持多个命名 Bot 配置，以及按 Pi 工作目录自动启动对应 Bot。
@@ -47,7 +48,7 @@
    /pi-telegram-bridge up
    ```
 
-4. 运行 `/pi-telegram-bridge status`，确认显示所选接收方式后，从允许的 Telegram 私聊发送一条纯文字消息。完整验证方法见[验证安装](#验证安装)。
+4. 运行 `/pi-telegram-bridge status`，确认显示所选接收方式后，从允许的 Telegram 私聊发送文字或一张普通照片。图片识别需要当前 Pi 模型支持视觉输入；完整验证方法见[验证安装](#验证安装)。
 
 ## 安装
 
@@ -237,7 +238,8 @@ Webhook 模式的 `url` 应为配置的完整 HTTPS URL；Long Polling 模式的
 | `/pi-telegram-bridge up` 启动失败 | Webhook 检查配置和端口占用；Long Polling 检查 Telegram API 网络连通性，并确认没有其他进程在拉取同一个 Bot。 |
 | Webhook 已运行，但 Bot 收不到消息 | 用 `getWebhookInfo` 检查 URL 和 `last_error_message`，确认 Tunnel 指向 Bridge 的实际端口。 |
 | Long Polling 已运行，但 Bot 收不到消息 | 确认 `getWebhookInfo` 的 `url` 为空，并停止其他使用同一 Bot Token 的轮询进程。 |
-| Telegram 请求到达，但没有触发 Pi | 确认消息来自配置的私聊 Chat ID，并且内容是纯文字；群聊和媒体消息会被忽略。 |
+| Telegram 请求到达，但没有触发 Pi | 确认消息来自配置的私聊 Chat ID，且内容是文字或普通照片；群聊及其他媒体消息会被忽略。 |
+| 照片可以发送但 Pi 无法识别内容 | 在 Pi 中切换到支持图片输入的视觉模型，并确认 Pi 设置未启用 `blockImages`。 |
 | Pi 已完成，但 Telegram 没有回复 | 检查 Telegram API 错误、代理连通性及日志中的重试或格式降级记录。 |
 | Windows 登录后没有自动启动 | 重新运行 setup，确认同时启用了“Bridge 自动启动”和“Windows 登录自启动”，并检查任务计划程序中的 `Pi Telegram Bridge - <配置名称>`。 |
 | 命名 Bot 启动了错误配置 | 环境变量只覆盖 `default`；使用 `/pi-telegram-bridge list` 和 `/pi-telegram-bridge status` 确认配置名称。 |
@@ -254,7 +256,8 @@ Webhook 模式的 `url` 应为配置的完整 HTTPS URL；Long Polling 模式的
 - `TELEGRAM_PROXY` 仅交给 Telegram transport 的 Undici `ProxyAgent`，不会设置进程级 `HTTP_PROXY` 或 `HTTPS_PROXY`。
 - Telegram 临时失败按 1、2、4 秒最多重试 3 次；HTTP 429 优先遵循 `retry_after`。
 - 单个 Pi Session 同时只运行一个 Bot；不同工作目录和 Pi Session 可以分别运行不同 Bot。
-- 不支持群聊、媒体、Telegram 命令、数据库、多用户、Web UI 或 SOCKS5。
+- 普通照片由 Bridge 通过 Telegram `getFile` 下载，最大接受 20 MiB，再以 Pi 原生 `ImageContent` 提交；Pi 会按当前设置和模型限制规范化图片。
+- 不支持群聊、以文件形式发送的图片、相册合并、其他媒体、Telegram 命令、数据库、多用户、Web UI 或 SOCKS5。
 
 ## 开发验证
 

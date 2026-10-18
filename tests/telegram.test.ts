@@ -159,6 +159,36 @@ describe("TelegramTransport", () => {
     await transport.close();
   });
 
+  it("downloads a Telegram photo as Pi image content", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        result: { file_path: "photos/receipt.jpg" },
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(Uint8Array.from([1, 2, 3]), {
+        status: 200,
+        headers: { "content-type": "image/jpeg" },
+      })) as unknown as typeof undiciFetch;
+    const transport = new TelegramTransport({ botToken: "123:token", fetchImpl });
+
+    await expect(transport.downloadImage("photo-id")).resolves.toEqual({
+      type: "image",
+      data: Buffer.from([1, 2, 3]).toString("base64"),
+      mimeType: "image/jpeg",
+    });
+
+    const calls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(String(calls[0]?.[0])).toBe("https://api.telegram.org/bot123:token/getFile");
+    expect(JSON.parse(String((calls[0]?.[1] as RequestInit | undefined)?.body))).toEqual({
+      file_id: "photo-id",
+    });
+    expect(String(calls[1]?.[0])).toBe(
+      "https://api.telegram.org/file/bot123:token/photos/receipt.jpg",
+    );
+    await transport.close();
+  });
+
   it("registers the public URL and secret with Telegram setWebhook", async () => {
     const fetchImpl = vi.fn(async () => okResponse()) as unknown as typeof undiciFetch;
     const transport = new TelegramTransport({ botToken: "123:token", fetchImpl });

@@ -74,6 +74,34 @@ describe("processTelegramJob", () => {
     expect(telegram.sendMessage).toHaveBeenCalledWith("123", "final answer");
   });
 
+  it("downloads a photo and sends it to Pi with the accounting prompt", async () => {
+    const image = {
+      type: "image" as const,
+      data: "AQID",
+      mimeType: "image/jpeg",
+    };
+    const imageJob: TelegramJob = {
+      updateId: 2,
+      chatId: "123",
+      text: "识别并记账",
+      image: { fileId: "photo-id", mimeType: "image/jpeg" },
+    };
+    const piRunner = { run: vi.fn(async () => ({ text: "已记账" })) };
+    const telegram = {
+      downloadImage: vi.fn(async () => image),
+      sendMessage: vi.fn(async () => undefined),
+    };
+
+    await processTelegramJob(imageJob, piRunner, telegram);
+
+    expect(telegram.downloadImage).toHaveBeenCalledWith("photo-id");
+    expect(piRunner.run).toHaveBeenCalledWith([
+      { type: "text", text: "识别并记账" },
+      image,
+    ]);
+    expect(telegram.sendMessage).toHaveBeenCalledWith("123", "已记账");
+  });
+
   it("sends the fixed failure reply when Pi fails", async () => {
     const piRunner = { run: vi.fn(async () => { throw new Error("private failure"); }) };
     const telegram = { sendMessage: vi.fn(async () => undefined) };

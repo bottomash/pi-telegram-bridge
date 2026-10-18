@@ -110,19 +110,64 @@ describe("Telegram webhook", () => {
     expect(onMessage).not.toHaveBeenCalled();
   });
 
-  it("ignores non-text and non-private updates", async () => {
+  it("accepts a private photo with its caption and selects the largest size", async () => {
+    const received: TelegramJob[] = [];
+    const harness = await startHarness((job) => {
+      received.push(job);
+    });
+
+    const response = await post(harness.url, {
+      update_id: 104,
+      message: {
+        chat: { id: 123456789, type: "private" },
+        caption: "识别并记账",
+        photo: [
+          { file_id: "small", width: 320, height: 240, file_size: 1000 },
+          { file_id: "large", width: 1280, height: 960, file_size: 8000 },
+        ],
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(received).toEqual([{
+      updateId: 104,
+      chatId: CHAT_ID,
+      text: "识别并记账",
+      image: { fileId: "large", mimeType: "image/jpeg" },
+    }]);
+  });
+
+  it("adds the accounting prompt when a private photo has no caption", async () => {
+    const received: TelegramJob[] = [];
+    const harness = await startHarness((job) => {
+      received.push(job);
+    });
+
+    await post(harness.url, {
+      update_id: 105,
+      message: {
+        chat: { id: 123456789, type: "private" },
+        photo: [{ file_id: "receipt", width: 800, height: 600 }],
+      },
+    });
+
+    expect(received[0]?.text).toContain("记账");
+    expect(received[0]?.image?.fileId).toBe("receipt");
+  });
+
+  it("ignores unsupported media and non-private updates", async () => {
     const onMessage = vi.fn();
     const harness = await startHarness(onMessage);
-    const photo = await post(harness.url, {
-      update_id: 104,
-      message: { chat: { id: 123456789, type: "private" }, photo: [{}] },
+    const sticker = await post(harness.url, {
+      update_id: 106,
+      message: { chat: { id: 123456789, type: "private" }, sticker: {} },
     });
     const group = await post(harness.url, {
-      update_id: 105,
+      update_id: 107,
       message: { chat: { id: 123456789, type: "group" }, text: "x" },
     });
 
-    expect(photo.status).toBe(200);
+    expect(sticker.status).toBe(200);
     expect(group.status).toBe(200);
     expect(onMessage).not.toHaveBeenCalled();
   });
@@ -131,7 +176,7 @@ describe("Telegram webhook", () => {
     const onMessage = vi.fn();
     const harness = await startHarness(onMessage);
     const update = {
-      update_id: 106,
+      update_id: 108,
       message: { chat: { id: 123456789, type: "private" }, text: "once" },
     };
 

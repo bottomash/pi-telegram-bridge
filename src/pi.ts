@@ -7,6 +7,19 @@ import type {
 
 export type PiOutcome = "completed" | "aborted" | "error";
 
+export interface PiImageContent {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export interface PiTextContent {
+  type: "text";
+  text: string;
+}
+
+export type PiPrompt = string | (PiTextContent | PiImageContent)[];
+
 export interface PiAnswer {
   text: string;
 }
@@ -85,7 +98,7 @@ export class PiAgentBridge {
   private readonly sleep: (milliseconds: number) => Promise<void>;
 
   public constructor(
-    private readonly sendUserMessage: (prompt: string) => void,
+    private readonly sendUserMessage: (prompt: PiPrompt) => void,
     options: PiBridgeOptions = {},
   ) {
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
@@ -104,7 +117,7 @@ export class PiAgentBridge {
     active?.reject(new PiBridgeClosedError());
   }
 
-  public async run(prompt: string): Promise<PiAnswer> {
+  public async run(prompt: PiPrompt): Promise<PiAnswer> {
     if (this.closed) {
       throw new PiBridgeClosedError();
     }
