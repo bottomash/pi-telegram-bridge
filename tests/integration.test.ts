@@ -1,3 +1,5 @@
+import { access, readFile } from "node:fs/promises";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -100,6 +102,42 @@ describe("processTelegramJob", () => {
       image,
     ]);
     expect(telegram.sendMessage).toHaveBeenCalledWith("123", "已记账");
+  });
+
+  it("downloads a document to a temporary path for Pi and removes it afterwards", async () => {
+    const fileJob: TelegramJob = {
+      updateId: 3,
+      chatId: "123",
+      text: "总结附件",
+      file: {
+        fileId: "document-id",
+        fileName: "../report.txt",
+        mimeType: "text/plain",
+        fileSize: 5,
+      },
+    };
+    let temporaryFile = "";
+    const piRunner = {
+      run: vi.fn(async (prompt: unknown) => {
+        expect(typeof prompt).toBe("string");
+        const text = String(prompt);
+        temporaryFile = text.split("用户随消息发送的文件已临时下载到以下本地路径：\n")[1]
+          ?.split("\n")[0] ?? "";
+        expect(temporaryFile).toMatch(/pi-telegram-bridge-.+\/report\.txt$/u);
+        await expect(readFile(temporaryFile, "utf8")).resolves.toBe("hello");
+        return { text: "文件摘要" };
+      }),
+    };
+    const telegram = {
+      downloadDocument: vi.fn(async () => Buffer.from("hello")),
+      sendMessage: vi.fn(async () => undefined),
+    };
+
+    await processTelegramJob(fileJob, piRunner, telegram);
+
+    expect(telegram.downloadDocument).toHaveBeenCalledWith("document-id");
+    expect(telegram.sendMessage).toHaveBeenCalledWith("123", "文件摘要");
+    await expect(access(temporaryFile)).rejects.toThrow();
   });
 
   it("sends the fixed failure reply when Pi fails", async () => {

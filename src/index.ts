@@ -1,5 +1,6 @@
-import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import type {
   ExtensionAPI,
@@ -56,6 +57,42 @@ export interface PiRunner {
 export interface TelegramSender {
   sendMessage(chatId: string | number, text: string): Promise<void>;
   downloadImage?(fileId: string): Promise<TelegramImageContent>;
+  downloadDocument?(fileId: string): Promise<Buffer>;
+}
+
+function safeAttachmentName(fileName: string): string {
+  const baseName = fileName.split(/[\\/]/u).at(-1)?.trim() ?? "";
+  const sanitized = baseName
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, "_")
+    .replace(/[. ]+$/u, "")
+    .slice(0, 80);
+  if (!sanitized || sanitized === "." || sanitized === "..") {
+    return "attachment";
+  }
+  const stem = sanitized.split(".")[0]?.toUpperCase();
+  return stem !== undefined && /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(stem)
+    ? `_${sanitized}`
+    : sanitized;
+}
+
+function filePrompt(job: TelegramJob, filePath: string): string {
+  const file = job.file;
+  if (file === undefined) {
+    return job.text;
+  }
+  const details = [
+    `文件名：${JSON.stringify(file.fileName)}`,
+    ...(file.mimeType === undefined ? [] : [`MIME 类型：${file.mimeType}`]),
+    ...(file.fileSize === undefined ? [] : [`Telegram 标注大小：${file.fileSize} 字节`]),
+  ];
+  return [
+    job.text,
+    "",
+    "用户随消息发送的文件已临时下载到以下本地路径：",
+    filePath.replaceAll("\\", "/"),
+    ...details,
+    "请读取并按用户要求处理该文件；如需长期保留，请将内容复制到项目目录。",
+  ].join("\n");
 }
 
 function safeErrorLabel(error: unknown): string {
@@ -84,6 +121,7 @@ export async function processTelegramJob(
 ): Promise<void> {
   logger.info("[pi] processing telegram message");
   let reply: string;
+  let temporaryDirectory: string | undefined;
   try {
     let prompt: PiPrompt = job.text;
     if (job.image !== undefined) {
@@ -95,10 +133,27 @@ export async function processTelegramJob(
         { type: "text", text: job.text },
         image,
       ];
+    } else if (job.file !== undefined) {
+      if (telegram.downloadDocument === undefined) {
+        throw new Error("Telegram document download is unavailable");
+      }
+      const data = await telegram.downloadDocument(job.file.fileId);
+      temporaryDirectory = await mkdtemp(join(tmpdir(), "pi-telegram-bridge-"));
+      const filePath = join(temporaryDirectory, safeAttachmentName(job.file.fileName));
+      await writeFile(filePath, data, { flag: "wx" });
+      prompt = filePrompt(job, filePath);
     }
     reply = (await piRunner.run(prompt)).text;
   } catch {
     reply = PI_FAILURE_MESSAGE;
+  } finally {
+    if (temporaryDirectory !== undefined) {
+      try {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      } catch {
+        logger.warn("[telegram] temporary attachment cleanup failed");
+      }
+    }
   }
 
   try {

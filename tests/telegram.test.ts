@@ -189,6 +189,33 @@ describe("TelegramTransport", () => {
     await transport.close();
   });
 
+  it("downloads a Telegram document as binary data", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        result: { file_path: "documents/report.pdf" },
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(Uint8Array.from([4, 5, 6]), {
+        status: 200,
+        headers: { "content-type": "application/pdf" },
+      })) as unknown as typeof undiciFetch;
+    const transport = new TelegramTransport({ botToken: "123:token", fetchImpl });
+
+    await expect(transport.downloadDocument("document-id")).resolves.toEqual(
+      Buffer.from([4, 5, 6]),
+    );
+
+    const calls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(JSON.parse(String((calls[0]?.[1] as RequestInit | undefined)?.body))).toEqual({
+      file_id: "document-id",
+    });
+    expect(String(calls[1]?.[0])).toBe(
+      "https://api.telegram.org/file/bot123:token/documents/report.pdf",
+    );
+    await transport.close();
+  });
+
   it("registers the public URL and secret with Telegram setWebhook", async () => {
     const fetchImpl = vi.fn(async () => okResponse()) as unknown as typeof undiciFetch;
     const transport = new TelegramTransport({ botToken: "123:token", fetchImpl });

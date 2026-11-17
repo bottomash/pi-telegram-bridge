@@ -5,10 +5,11 @@ import { MAX_TELEGRAM_CODE_POINTS, type BridgeLogger, consoleLogger } from "./co
 
 const MAX_RETRIES = 3;
 const MAX_TELEGRAM_ENTITIES = 100;
-const MAX_TELEGRAM_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_TELEGRAM_FILE_BYTES = 20 * 1024 * 1024;
 
 export const DEFAULT_ACCOUNTING_IMAGE_PROMPT =
   "请识别这张图片中的账单、发票或支付信息，并根据当前项目的规则处理记账。";
+export const DEFAULT_DOCUMENT_PROMPT = "请读取并处理这个文件。";
 
 export interface TelegramUpdate {
   update_id: number;
@@ -22,6 +23,13 @@ export interface TelegramPhotoSize {
   height?: number;
 }
 
+export interface TelegramDocument {
+  file_id?: string;
+  file_name?: string;
+  file_size?: number;
+  mime_type?: string;
+}
+
 export interface TelegramMessage {
   chat?: {
     id?: number | string;
@@ -30,6 +38,7 @@ export interface TelegramMessage {
   text?: string;
   caption?: string;
   photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
 }
 
 export interface TelegramImage {
@@ -43,11 +52,19 @@ export interface TelegramImageContent {
   mimeType: string;
 }
 
+export interface TelegramFile {
+  fileId: string;
+  fileName: string;
+  mimeType?: string;
+  fileSize?: number;
+}
+
 export interface TelegramJob {
   updateId: number;
   chatId: string;
   text: string;
   image?: TelegramImage;
+  file?: TelegramFile;
 }
 
 export interface TelegramApiPayload {
@@ -550,6 +567,19 @@ export class TelegramTransport {
   }
 
   public async downloadImage(fileId: string): Promise<TelegramImageContent> {
+    const data = await this.downloadTelegramFile(fileId);
+    return {
+      type: "image",
+      data: data.toString("base64"),
+      mimeType: "image/jpeg",
+    };
+  }
+
+  public async downloadDocument(fileId: string): Promise<Buffer> {
+    return this.downloadTelegramFile(fileId);
+  }
+
+  private async downloadTelegramFile(fileId: string): Promise<Buffer> {
     const result = await this.request("getFile", { file_id: fileId });
     const filePath = result && typeof result === "object"
       ? (result as { file_path?: unknown }).file_path
@@ -559,14 +589,9 @@ export class TelegramTransport {
     }
 
     const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
-    const data = await this.downloadFile(
+    return this.downloadFile(
       `https://api.telegram.org/file/bot${this.options.botToken}/${encodedPath}`,
     );
-    return {
-      type: "image",
-      data: data.toString("base64"),
-      mimeType: "image/jpeg",
-    };
   }
 
   public async setWebhook(url: string, secretToken: string): Promise<void> {
@@ -645,12 +670,12 @@ export class TelegramTransport {
         const response = await this.fetchImpl(url, init);
         if (response.ok) {
           const declaredSize = Number(response.headers.get("content-length"));
-          if (Number.isFinite(declaredSize) && declaredSize > MAX_TELEGRAM_IMAGE_BYTES) {
-            throw new TelegramApiError(413, undefined, "Telegram image is too large");
+          if (Number.isFinite(declaredSize) && declaredSize > MAX_TELEGRAM_FILE_BYTES) {
+            throw new TelegramApiError(413, undefined, "Telegram file is too large");
           }
           const data = Buffer.from(await response.arrayBuffer());
-          if (data.byteLength > MAX_TELEGRAM_IMAGE_BYTES) {
-            throw new TelegramApiError(413, undefined, "Telegram image is too large");
+          if (data.byteLength > MAX_TELEGRAM_FILE_BYTES) {
+            throw new TelegramApiError(413, undefined, "Telegram file is too large");
           }
           return data;
         }
@@ -680,7 +705,7 @@ export class TelegramTransport {
           throw lastError;
         }
         const waitSeconds = lastError.retryAfterSeconds ?? 2 ** attempt;
-        this.logger.warn(`[telegram] image download retrying after ${waitSeconds}s`);
+        this.logger.warn(`[telegram] file download retrying after ${waitSeconds}s`);
         await this.sleep(waitSeconds * 1000);
       }
     }

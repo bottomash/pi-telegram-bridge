@@ -5,6 +5,7 @@ import { type BridgeLogger, consoleLogger } from "./config.js";
 import { UpdateDedupe } from "./dedupe.js";
 import {
   DEFAULT_ACCOUNTING_IMAGE_PROMPT,
+  DEFAULT_DOCUMENT_PROMPT,
   type TelegramJob,
   type TelegramPhotoSize,
   type TelegramUpdate,
@@ -117,18 +118,35 @@ export function telegramUpdateToJob(
     };
   }
 
+  const caption = typeof message.caption === "string" ? message.caption.trim() : "";
   const photo = Array.isArray(message.photo) ? bestPhoto(message.photo) : undefined;
-  if (typeof photo?.file_id !== "string") {
+  if (typeof photo?.file_id === "string") {
+    return {
+      updateId: update.update_id,
+      chatId: String(chatId),
+      text: caption || DEFAULT_ACCOUNTING_IMAGE_PROMPT,
+      image: {
+        fileId: photo.file_id,
+        mimeType: "image/jpeg",
+      },
+    };
+  }
+
+  const document = message.document;
+  if (typeof document?.file_id !== "string" || document.file_id.length === 0) {
     return undefined;
   }
-  const caption = typeof message.caption === "string" ? message.caption.trim() : "";
   return {
     updateId: update.update_id,
     chatId: String(chatId),
-    text: caption || DEFAULT_ACCOUNTING_IMAGE_PROMPT,
-    image: {
-      fileId: photo.file_id,
-      mimeType: "image/jpeg",
+    text: caption || DEFAULT_DOCUMENT_PROMPT,
+    file: {
+      fileId: document.file_id,
+      fileName: typeof document.file_name === "string" && document.file_name.trim()
+        ? document.file_name
+        : "attachment",
+      ...(typeof document.mime_type === "string" ? { mimeType: document.mime_type } : {}),
+      ...(typeof document.file_size === "number" ? { fileSize: document.file_size } : {}),
     },
   };
 }

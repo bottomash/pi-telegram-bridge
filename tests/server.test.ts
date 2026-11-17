@@ -155,15 +155,67 @@ describe("Telegram webhook", () => {
     expect(received[0]?.image?.fileId).toBe("receipt");
   });
 
+  it("accepts a private document with its caption and metadata", async () => {
+    const received: TelegramJob[] = [];
+    const harness = await startHarness((job) => {
+      received.push(job);
+    });
+
+    const response = await post(harness.url, {
+      update_id: 106,
+      message: {
+        chat: { id: 123456789, type: "private" },
+        caption: "总结这个文件",
+        document: {
+          file_id: "document-id",
+          file_name: "report.pdf",
+          mime_type: "application/pdf",
+          file_size: 1234,
+        },
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(received).toEqual([{
+      updateId: 106,
+      chatId: CHAT_ID,
+      text: "总结这个文件",
+      file: {
+        fileId: "document-id",
+        fileName: "report.pdf",
+        mimeType: "application/pdf",
+        fileSize: 1234,
+      },
+    }]);
+  });
+
+  it("adds a processing prompt when a private document has no caption", async () => {
+    const received: TelegramJob[] = [];
+    const harness = await startHarness((job) => {
+      received.push(job);
+    });
+
+    await post(harness.url, {
+      update_id: 107,
+      message: {
+        chat: { id: 123456789, type: "private" },
+        document: { file_id: "document-id", file_name: "notes.txt" },
+      },
+    });
+
+    expect(received[0]?.text).toContain("文件");
+    expect(received[0]?.file?.fileName).toBe("notes.txt");
+  });
+
   it("ignores unsupported media and non-private updates", async () => {
     const onMessage = vi.fn();
     const harness = await startHarness(onMessage);
     const sticker = await post(harness.url, {
-      update_id: 106,
+      update_id: 108,
       message: { chat: { id: 123456789, type: "private" }, sticker: {} },
     });
     const group = await post(harness.url, {
-      update_id: 107,
+      update_id: 109,
       message: { chat: { id: 123456789, type: "group" }, text: "x" },
     });
 
@@ -176,7 +228,7 @@ describe("Telegram webhook", () => {
     const onMessage = vi.fn();
     const harness = await startHarness(onMessage);
     const update = {
-      update_id: 108,
+      update_id: 110,
       message: { chat: { id: 123456789, type: "private" }, text: "once" },
     };
 
